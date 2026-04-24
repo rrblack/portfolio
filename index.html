@@ -1,0 +1,1385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kyle Porter — Full-Stack Web Developer</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23080808'/><rect x='0' y='0' width='4' height='32' fill='%23e63946'/><text x='19' y='23' font-family='monospace' font-size='15' font-weight='700' fill='%23f2eeea' text-anchor='middle' letter-spacing='-1'>KP</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Noto+Sans+JP:wght@300;400;500;700&family=Kaushan+Script&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+:root{
+  --black:#080808;
+  --surface:#111111;
+  --surface2:#181818;
+  --red:#e63946;
+  --red-dim:rgba(230,57,70,0.12);
+  --red-glow:rgba(230,57,70,0.35);
+  --white:#f2eeea;
+  --gray:#888888;
+  --font-head:'Space Grotesk','Noto Sans JP',sans-serif;
+  --font-mono:'Space Mono',monospace;
+  --font-jp:'Noto Sans JP',sans-serif;
+  --font-sig:'Kaushan Script',cursive;
+}
+
+html{scroll-behavior:smooth}
+body{background:var(--black);color:var(--white);font-family:var(--font-head);overflow-x:hidden}
+
+body::before{
+  content:'';position:fixed;inset:0;z-index:9990;pointer-events:none;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  opacity:0.025;
+}
+
+/* ── NAV ── */
+nav{
+  position:fixed;top:0;left:0;right:0;z-index:1000;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:20px 60px;
+  transition:backdrop-filter 0.3s,background 0.3s;
+}
+nav.scrolled{
+  backdrop-filter:blur(16px);
+  background:rgba(8,8,8,0.88);
+  border-bottom:1px solid rgba(255,255,255,0.05);
+}
+.nav-logo{
+  font-family:var(--font-mono);
+  font-size:18px;font-weight:700;
+  letter-spacing:-0.02em;color:var(--white);
+}
+.nav-right{display:flex;align-items:center;gap:36px}
+.nav-links{display:flex;gap:32px;list-style:none}
+.nav-links a{
+  font-size:12px;letter-spacing:0.1em;text-transform:uppercase;
+  color:var(--gray);text-decoration:none;transition:color 0.2s;
+}
+.nav-links a:hover{color:var(--white)}
+
+.lang-toggle{
+  display:flex;align-items:center;
+  background:var(--surface);border:1px solid rgba(255,255,255,0.08);
+  padding:2px;
+}
+.lang-btn{
+  font-family:var(--font-mono);font-size:11px;
+  letter-spacing:0.08em;font-weight:700;
+  padding:6px 14px;border:none;background:transparent;
+  color:var(--gray);cursor:pointer;transition:all 0.2s;
+}
+.lang-btn.active{background:var(--red);color:var(--white)}
+
+/* ── HERO ── */
+#hero{
+  position:relative;min-height:100vh;
+  display:grid;grid-template-columns:1fr 1fr;
+  align-items:center;padding:120px 60px 80px;
+  overflow:hidden;gap:60px;
+}
+.hero-bg-grid{
+  position:absolute;inset:0;z-index:0;
+  background-image:
+    linear-gradient(rgba(230,57,70,0.04) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(230,57,70,0.04) 1px,transparent 1px);
+  background-size:80px 80px;
+  mask-image:radial-gradient(ellipse 90% 90% at 50% 50%,black,transparent);
+}
+.hero-orb{position:absolute;z-index:0;border-radius:50%;filter:blur(120px);pointer-events:none}
+.orb1{width:500px;height:500px;background:rgba(230,57,70,0.15);top:-5%;right:10%}
+.orb2{width:350px;height:350px;background:rgba(230,57,70,0.07);bottom:5%;left:-3%}
+
+.hero-left{position:relative;z-index:1}
+.hero-tag{
+  display:inline-flex;align-items:center;gap:10px;
+  font-family:var(--font-mono);font-size:11px;
+  letter-spacing:0.18em;text-transform:uppercase;
+  color:var(--red);margin-bottom:24px;
+  opacity:0;animation:fadeUp 0.8s 0.2s forwards;
+}
+.hero-tag::before{content:'';display:block;width:24px;height:1px;background:var(--red)}
+
+.hero-name{
+  font-family:var(--font-sig);
+  font-size:clamp(72px,8.4vw,128px);
+  font-weight:400;line-height:1.05;
+  letter-spacing:-0.01em;margin-bottom:32px;
+  color:var(--white);
+  opacity:0;animation:fadeUp 0.8s 0.32s forwards;
+  text-shadow:
+    0 0 60px rgba(230,57,70,0.5),
+    0 0 120px rgba(230,57,70,0.25),
+    0 0 6px rgba(230,57,70,0.25);
+}
+.hero-sub{
+  font-size:16px;color:var(--gray);
+  max-width:440px;line-height:1.75;margin-bottom:44px;
+  opacity:0;animation:fadeUp 0.8s 0.46s forwards;
+}
+.hero-ctas{
+  display:flex;gap:14px;align-items:center;flex-wrap:wrap;
+  opacity:0;animation:fadeUp 0.8s 0.6s forwards;
+}
+.btn-primary{
+  display:inline-flex;align-items:center;gap:8px;
+  background:var(--red);color:var(--white);
+  padding:13px 28px;font-family:var(--font-head);
+  font-size:13px;font-weight:600;letter-spacing:0.02em;
+  border:none;cursor:pointer;text-decoration:none;
+  transition:transform 0.2s,box-shadow 0.2s;
+}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 28px rgba(230,57,70,0.4)}
+.btn-ghost{
+  display:inline-flex;align-items:center;gap:8px;
+  background:transparent;color:var(--white);
+  padding:13px 28px;font-family:var(--font-head);
+  font-size:13px;font-weight:500;
+  border:1px solid rgba(255,255,255,0.14);
+  cursor:pointer;text-decoration:none;
+  transition:border-color 0.2s,background 0.2s;
+}
+.btn-ghost:hover{border-color:var(--red);background:var(--red-dim)}
+.btn-gh{
+  display:inline-flex;align-items:center;gap:8px;
+  background:transparent;color:var(--gray);
+  padding:13px 20px;font-family:var(--font-mono);
+  font-size:11px;letter-spacing:0.08em;
+  border:1px solid rgba(255,255,255,0.1);
+  cursor:pointer;text-decoration:none;
+  transition:border-color 0.2s,color 0.2s;
+}
+.btn-gh:hover{border-color:var(--red);color:var(--white)}
+.btn-gh svg{flex-shrink:0}
+
+.live-badge{display:flex;align-items:center;gap:8px;font-size:11px;color:#4ade80;font-family:var(--font-mono)}
+.live-dot{width:7px;height:7px;background:#4ade80;border-radius:50%;animation:pulse 2s infinite}
+
+/* ── HERO RIGHT DASHBOARD ── */
+.hero-right{
+  position:relative;z-index:1;
+  opacity:0;animation:fadeUp 0.9s 0.55s forwards;
+  display:flex;flex-direction:column;gap:2px;
+}
+.hero-dash-block{
+  background:var(--surface);border:1px solid rgba(255,255,255,0.07);
+  padding:22px 24px;
+}
+.hero-dash-grow{flex:1;display:flex;flex-direction:column;justify-content:center}
+.hero-dash-label{
+  font-family:var(--font-mono);font-size:9px;
+  letter-spacing:0.2em;text-transform:uppercase;
+  color:var(--red);margin-bottom:14px;
+}
+.hero-stack-pills{display:flex;flex-wrap:wrap;gap:8px}
+.hero-stack-pill{
+  font-family:var(--font-mono);font-size:11px;
+  color:rgba(242,238,234,0.5);
+  border:1px solid rgba(255,255,255,0.08);
+  padding:5px 12px;transition:border-color 0.2s,color 0.2s;
+}
+.hero-stack-pill:hover{border-color:var(--red);color:var(--white)}
+.hero-creds-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.hero-cred{
+  background:var(--black);border:1px solid rgba(255,255,255,0.06);
+  padding:14px;
+}
+.hero-cred-badge{
+  font-family:var(--font-mono);font-size:18px;font-weight:700;
+  color:var(--red);line-height:1;margin-bottom:5px;
+}
+.hero-cred-label{font-family:var(--font-mono);font-size:9px;color:var(--gray);letter-spacing:0.08em;text-transform:uppercase}
+.hero-live-row{display:flex;align-items:center;justify-content:space-between}
+.hero-live-name{font-size:15px;font-weight:600}
+.hero-live-sub{font-family:var(--font-mono);font-size:9px;color:var(--gray);margin-top:3px}
+.hero-live-list{display:flex;flex-direction:column}
+.hero-live-item{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:14px;padding:12px 0;
+}
+.hero-live-item:first-child{padding-top:0}
+.hero-live-item:last-child{padding-bottom:0}
+.hero-live-item + .hero-live-item{border-top:1px solid rgba(255,255,255,0.06)}
+.hero-live-item .live-dot{flex-shrink:0}
+
+.hero-scroll{
+  position:absolute;bottom:32px;left:60px;z-index:1;
+  display:flex;align-items:center;gap:12px;
+  font-family:var(--font-mono);font-size:10px;
+  color:var(--gray);letter-spacing:0.12em;
+  opacity:0;animation:fadeUp 0.8s 1s forwards;
+}
+.scroll-line{width:36px;height:1px;background:var(--gray);position:relative;overflow:hidden}
+.scroll-line::after{
+  content:'';position:absolute;inset:0;background:var(--red);
+  transform:translateX(-100%);animation:scrollAnim 2.2s 1.5s infinite;
+}
+
+/* ── SECTIONS ── */
+section{padding:110px 60px}
+.section-label{
+  display:flex;align-items:center;gap:12px;
+  font-family:var(--font-mono);font-size:10px;
+  letter-spacing:0.2em;text-transform:uppercase;
+  color:var(--red);margin-bottom:14px;
+}
+.section-label::after{content:'';width:36px;height:1px;background:var(--red)}
+.section-title{
+  font-size:clamp(34px,4.5vw,60px);
+  font-weight:700;line-height:1.05;
+  letter-spacing:-0.025em;margin-bottom:60px;
+}
+
+/* ── REVEAL ── */
+.reveal{opacity:0;transform:translateY(36px);transition:opacity 0.7s cubic-bezier(.25,.46,.45,.94),transform 0.7s cubic-bezier(.25,.46,.45,.94)}
+.reveal.visible{opacity:1;transform:none}
+.reveal-delay-1{transition-delay:0.1s}
+.reveal-delay-2{transition-delay:0.2s}
+.reveal-delay-3{transition-delay:0.3s}
+.reveal-delay-4{transition-delay:0.4s}
+
+/* ── ABOUT ── */
+#about{background:var(--black)}
+.about-grid{display:grid;grid-template-columns:3fr 2fr;gap:80px;align-items:start}
+.about-text p{font-size:16px;line-height:1.85;color:rgba(242,238,234,0.7);margin-bottom:18px}
+.about-text p strong{color:var(--white)}
+.about-text .accent{color:var(--red)}
+.about-stats{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:rgba(255,255,255,0.05);margin-top:40px}
+.stat{padding:26px;background:var(--black)}
+.stat-num{font-size:44px;font-weight:700;line-height:1;color:var(--red);letter-spacing:-0.03em}
+.stat-label{font-size:11px;color:var(--gray);letter-spacing:0.08em;text-transform:uppercase;margin-top:6px}
+
+.about-side{display:flex;flex-direction:column;gap:2px}
+.about-photo{
+  width:100%;aspect-ratio:4/3;
+  position:relative;overflow:hidden;
+  background:var(--surface2);border:1px solid rgba(255,255,255,0.06);
+}
+.about-photo img{width:100%;height:100%;object-fit:cover;display:block}
+.about-photo-corner{position:absolute;top:-1px;right:-1px;width:44px;height:44px;background:var(--red);clip-path:polygon(100% 0,0 0,100% 100%);z-index:2}
+.about-side-card{background:var(--surface);border:1px solid rgba(255,255,255,0.06);padding:24px}
+.about-side-title{font-family:var(--font-mono);font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:var(--red);margin-bottom:14px}
+.about-side-list{display:flex;flex-direction:column;gap:8px}
+.about-side-item{font-size:13px;color:rgba(242,238,234,0.65);padding-left:12px;border-left:2px solid rgba(230,57,70,0.3);line-height:1.4}
+
+/* ── GITHUB ── */
+#github{background:var(--surface);padding:110px 60px}
+.github-header{
+  display:flex;align-items:flex-end;justify-content:space-between;
+  gap:24px;margin-bottom:28px;flex-wrap:wrap;
+}
+.github-header .section-title{margin-bottom:8px}
+.github-contrib-count{
+  font-family:var(--font-mono);font-size:12px;color:var(--gray);letter-spacing:0.05em;
+}
+.github-contrib-count strong{color:var(--white)}
+.github-link-pill{
+  display:inline-flex;align-items:center;gap:8px;
+  font-family:var(--font-mono);font-size:11px;
+  color:var(--gray);text-decoration:none;
+  border:1px solid rgba(255,255,255,0.09);
+  padding:7px 14px;letter-spacing:0.08em;
+  transition:border-color 0.2s,color 0.2s;
+}
+.github-link-pill:hover{border-color:var(--red);color:var(--red)}
+
+.heatmap-outer{overflow-x:auto}
+.heatmap-month-row{position:relative;height:18px;margin-bottom:4px}
+.heatmap-month-tick{
+  position:absolute;top:0;
+  font-family:var(--font-mono);font-size:10px;
+  color:var(--gray);letter-spacing:0.06em;white-space:nowrap;
+}
+.heatmap-grid{display:flex;gap:3px;align-items:flex-start}
+.heatmap-week{display:flex;flex-direction:column;gap:3px;flex-shrink:0}
+.heatmap-cell{
+  width:13px;height:13px;border-radius:2px;flex-shrink:0;
+  transition:transform 0.1s;
+}
+.heatmap-cell:hover{transform:scale(1.3);z-index:2;position:relative}
+.heatmap-legend{display:flex;align-items:center;gap:5px;margin-top:10px}
+.heatmap-legend-label{font-family:var(--font-mono);font-size:10px;color:var(--gray)}
+.heatmap-legend-cell{width:13px;height:13px;border-radius:2px}
+.heatmap-loading{font-family:var(--font-mono);font-size:11px;color:var(--gray);letter-spacing:0.1em;padding:24px 0}
+
+.github-repos{
+  display:grid;grid-template-columns:repeat(3,1fr);
+  gap:2px;margin-top:36px;
+}
+.repo-card{
+  background:var(--black);border:1px solid rgba(255,255,255,0.06);
+  padding:22px;position:relative;
+  transition:border-color 0.25s;text-decoration:none;color:inherit;display:block;
+}
+.repo-card:hover{border-color:rgba(230,57,70,0.4)}
+.repo-card::after{
+  content:'';position:absolute;bottom:0;left:0;right:0;height:2px;
+  background:var(--red);transform:scaleX(0);transform-origin:left;
+  transition:transform 0.3s;
+}
+.repo-card:hover::after{transform:scaleX(1)}
+.repo-name{font-size:14px;font-weight:600;letter-spacing:-0.01em;margin-bottom:7px;color:var(--white)}
+.repo-desc{font-size:12px;color:var(--gray);line-height:1.6;margin-bottom:14px}
+.repo-meta{display:flex;align-items:center;gap:14px}
+.repo-lang{display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:10px;color:var(--gray)}
+.repo-lang-dot{width:8px;height:8px;border-radius:50%;background:var(--red);flex-shrink:0}
+
+/* ── PROJECTS ── */
+#projects{background:var(--black)}
+.projects-grid{display:grid;grid-template-columns:1fr;gap:2px}
+.project-card{
+  background:var(--surface);border:1px solid rgba(255,255,255,0.05);
+  overflow:hidden;position:relative;
+  transition:transform 0.3s cubic-bezier(.25,.46,.45,.94),border-color 0.3s;
+}
+.project-card:hover{transform:translateY(-4px);border-color:rgba(230,57,70,0.5)}
+.project-card:hover .card-overlay{opacity:1}
+.card-img{
+  width:100%;aspect-ratio:16/5;background:var(--surface2);
+  display:flex;align-items:center;justify-content:center;
+  position:relative;overflow:hidden;
+  border-bottom:1px solid rgba(255,255,255,0.05);
+}
+.card-img-stripe{position:absolute;inset:0;background:repeating-linear-gradient(-45deg,transparent,transparent 28px,rgba(255,255,255,0.015) 28px,rgba(255,255,255,0.015) 29px)}
+.card-img-label{font-family:var(--font-mono);font-size:10px;color:rgba(255,255,255,0.18);letter-spacing:0.1em;position:relative;z-index:1;text-align:center}
+.card-overlay{position:absolute;inset:0;background:rgba(230,57,70,0.06);opacity:0;transition:opacity 0.3s;pointer-events:none}
+.card-body{padding:26px}
+.card-tags{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px}
+.tag{font-family:var(--font-mono);font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--red);background:var(--red-dim);padding:4px 10px}
+.card-title{font-size:26px;font-weight:700;letter-spacing:-0.02em;margin-bottom:8px}
+.card-desc{font-size:13px;color:var(--gray);line-height:1.65;margin-bottom:22px}
+.card-link{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--red);text-decoration:none;transition:gap 0.2s,color 0.2s}
+.card-link:hover{gap:13px}
+.card-link-gh{display:inline-flex;align-items:center;color:var(--gray);text-decoration:none;transition:color 0.2s,transform 0.2s}
+.card-link-gh:hover{color:var(--white);transform:scale(1.15)}
+.card-status{display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:9px;color:#4ade80;margin-bottom:12px}
+.status-dot{width:6px;height:6px;border-radius:50%;background:#4ade80;animation:pulse 2s infinite}
+
+/* ── CERTIFICATIONS ── */
+#certifications{background:var(--surface)}
+.certs-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:2px}
+.cert-card{
+  background:var(--black);border:1px solid rgba(255,255,255,0.05);
+  padding:32px;display:flex;gap:22px;align-items:flex-start;
+  transition:border-color 0.3s;position:relative;overflow:hidden;
+}
+.cert-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--red);transform:scaleY(0);transform-origin:bottom;transition:transform 0.35s}
+.cert-card:hover::before{transform:scaleY(1)}
+.cert-card:hover{border-color:rgba(230,57,70,0.25)}
+.cert-icon{width:46px;height:46px;flex-shrink:0;background:var(--red-dim);border:1px solid rgba(230,57,70,0.18);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:9px;color:var(--red);letter-spacing:0.05em;text-align:center;line-height:1.3}
+.cert-issuer{font-family:var(--font-mono);font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--red);margin-bottom:7px}
+.cert-name{font-size:16px;font-weight:600;letter-spacing:-0.015em;line-height:1.3;margin-bottom:7px}
+.cert-desc{font-size:12px;color:var(--gray);line-height:1.6}
+
+/* ── SKILLS ── */
+#skills{background:var(--black)}
+.skills-layout{display:grid;grid-template-columns:1fr 1fr;gap:80px}
+.skills-col-title{font-family:var(--font-mono);font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--red);margin-bottom:28px}
+.skill-row{margin-bottom:18px}
+.skill-label-row{display:flex;justify-content:space-between;margin-bottom:7px}
+.skill-name{font-size:13px;font-weight:500}
+.skill-pct{font-family:var(--font-mono);font-size:11px;color:var(--gray)}
+.skill-bar{height:2px;background:rgba(255,255,255,0.07);position:relative;overflow:hidden}
+.skill-fill{position:absolute;left:0;top:0;bottom:0;background:var(--red);transform:scaleX(0);transform-origin:left;transition:transform 1s cubic-bezier(.25,.46,.45,.94)}
+.skill-fill.animate{transform:scaleX(1)}
+.tech-cloud{display:flex;flex-wrap:wrap;gap:9px}
+.tech-pill{font-family:var(--font-mono);font-size:11px;color:var(--gray);border:1px solid rgba(255,255,255,0.09);padding:7px 14px;transition:border-color 0.2s,color 0.2s,background 0.2s;cursor:default}
+.tech-pill:hover{border-color:var(--red);color:var(--white);background:var(--red-dim)}
+
+/* ── CONTACT ── */
+#contact{background:var(--surface)}
+.contact-inner{display:grid;grid-template-columns:1fr 1fr;gap:80px}
+.contact-copy p{font-size:16px;line-height:1.8;color:rgba(242,238,234,0.6);margin-bottom:32px}
+.contact-links{display:flex;flex-direction:column;gap:10px}
+.contact-link{display:inline-flex;align-items:center;gap:14px;font-size:13px;color:var(--gray);text-decoration:none;transition:color 0.2s;padding:3px 0}
+.contact-link:hover{color:var(--red)}
+.contact-link-icon{width:34px;height:34px;border:1px solid rgba(255,255,255,0.09);display:flex;align-items:center;justify-content:center;transition:border-color 0.2s}
+.contact-link:hover .contact-link-icon{border-color:var(--red)}
+.contact-form{display:flex;flex-direction:column;gap:14px}
+.form-group{display:flex;flex-direction:column;gap:7px}
+.form-label{font-family:var(--font-mono);font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gray)}
+.form-input{background:var(--black);border:1px solid rgba(255,255,255,0.08);color:var(--white);font-family:var(--font-head);font-size:14px;padding:13px 16px;outline:none;transition:border-color 0.2s}
+.form-input:focus{border-color:var(--red)}
+.form-input::placeholder{color:rgba(255,255,255,0.18)}
+textarea.form-input{resize:vertical;min-height:110px}
+
+/* ── FOOTER ── */
+footer{border-top:1px solid rgba(255,255,255,0.06);padding:28px 60px;display:flex;justify-content:space-between;align-items:center}
+.footer-copy{font-family:var(--font-mono);font-size:10px;color:var(--gray);letter-spacing:0.05em}
+
+/* ── FORM SUCCESS ── */
+.form-success{display:none;flex-direction:column;align-items:flex-start;gap:14px;padding:36px 0}
+.form-success.show{display:flex;animation:fadeIn 0.5s forwards}
+.success-icon{width:52px;height:52px;background:var(--red-dim);border:1px solid rgba(230,57,70,0.3);display:flex;align-items:center;justify-content:center;font-size:20px}
+.form-success h3{font-size:20px;font-weight:700;letter-spacing:-0.02em}
+.form-success p{font-size:13px;color:var(--gray);line-height:1.6}
+
+/* ── PROJECT MODAL ── */
+.modal-root{
+  position:fixed;inset:0;z-index:10000;
+  display:none;align-items:flex-start;justify-content:center;
+  padding:40px 24px;overflow-y:auto;
+}
+.modal-root.open{display:flex}
+.modal-backdrop{
+  position:fixed;inset:0;background:rgba(0,0,0,0.82);
+  backdrop-filter:blur(8px);cursor:pointer;
+}
+.modal-panel{
+  position:relative;z-index:1;max-width:980px;width:100%;
+  background:var(--black);border:1px solid rgba(255,255,255,0.08);
+  animation:modalIn 0.35s cubic-bezier(.25,.46,.45,.94);
+}
+@keyframes modalIn{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:none}}
+.modal-close{
+  position:absolute;top:16px;right:16px;z-index:3;
+  width:40px;height:40px;border:1px solid rgba(255,255,255,0.12);
+  background:rgba(8,8,8,0.7);color:var(--white);
+  font-size:22px;line-height:1;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:border-color 0.2s,color 0.2s,background 0.2s;
+}
+.modal-close:hover{border-color:var(--red);color:var(--red);background:var(--red-dim)}
+.modal-hero{
+  width:100%;aspect-ratio:16/5;overflow:hidden;
+  background:var(--surface2);position:relative;
+  border-bottom:1px solid rgba(255,255,255,0.06);
+}
+.modal-hero img{width:100%;height:100%;object-fit:cover;display:block}
+.modal-hero::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(to bottom,transparent 50%,rgba(8,8,8,0.6));
+  pointer-events:none;
+}
+.modal-body{padding:36px 44px 44px}
+.modal-status{
+  display:inline-flex;align-items:center;gap:8px;
+  font-family:var(--font-mono);font-size:10px;color:#4ade80;
+  letter-spacing:0.15em;text-transform:uppercase;margin-bottom:14px;
+}
+.modal-status .status-dot{width:7px;height:7px}
+.modal-title{
+  font-size:clamp(34px,4vw,52px);font-weight:700;
+  letter-spacing:-0.025em;line-height:1.05;margin-bottom:10px;
+}
+.modal-tagline{
+  font-size:16px;color:rgba(242,238,234,0.7);line-height:1.6;
+  max-width:720px;margin-bottom:28px;
+}
+.modal-meta{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+  background:rgba(255,255,255,0.05);margin-bottom:32px;
+}
+.modal-meta-cell{background:var(--surface);padding:16px 18px}
+.modal-meta-label{
+  font-family:var(--font-mono);font-size:9px;
+  letter-spacing:0.15em;text-transform:uppercase;
+  color:var(--red);margin-bottom:6px;
+}
+.modal-meta-val{font-size:13px;font-weight:600;color:var(--white)}
+.modal-section{margin-bottom:28px}
+.modal-section-title{
+  font-family:var(--font-mono);font-size:10px;
+  letter-spacing:0.18em;text-transform:uppercase;
+  color:var(--red);margin-bottom:14px;
+  display:flex;align-items:center;gap:10px;
+}
+.modal-section-title::after{content:'';flex:1;height:1px;background:rgba(230,57,70,0.2)}
+.modal-stack-row{display:flex;flex-wrap:wrap;gap:8px}
+.modal-stack-pill{
+  font-family:var(--font-mono);font-size:11px;
+  color:rgba(242,238,234,0.7);
+  border:1px solid rgba(255,255,255,0.09);
+  background:var(--surface);padding:6px 12px;
+}
+.modal-paragraph{
+  font-size:14px;color:rgba(242,238,234,0.75);
+  line-height:1.75;max-width:760px;
+}
+.modal-list{list-style:none;padding:0;display:flex;flex-direction:column;gap:10px}
+.modal-list li{
+  font-size:13px;color:rgba(242,238,234,0.75);
+  line-height:1.6;padding-left:18px;position:relative;
+}
+.modal-list li::before{
+  content:'';position:absolute;left:0;top:9px;
+  width:8px;height:1px;background:var(--red);
+}
+.modal-actions{
+  display:flex;gap:12px;flex-wrap:wrap;
+  padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);margin-top:8px;padding-top:28px;
+}
+
+@media(max-width:720px){
+  .modal-body{padding:24px 20px 28px}
+  .modal-meta{grid-template-columns:repeat(2,1fr)}
+  .modal-title{font-size:30px}
+}
+
+/* ── CONTACT STATUS CARD ── */
+.contact-inner{align-items:start}
+.contact-status{
+  background:var(--black);border:1px solid rgba(255,255,255,0.06);
+  border-left:2px solid var(--red);
+  padding:20px 24px;margin-bottom:28px;
+}
+.contact-status-row{
+  display:flex;align-items:center;gap:14px;
+  padding:8px 0;
+}
+.contact-status-row + .contact-status-row{border-top:1px solid rgba(255,255,255,0.04)}
+.contact-status-label{
+  font-family:var(--font-mono);font-size:9px;
+  color:var(--gray);letter-spacing:0.15em;text-transform:uppercase;
+  flex-shrink:0;width:82px;
+}
+.contact-status-value{
+  font-size:13px;color:var(--white);font-weight:500;
+  display:flex;align-items:center;gap:8px;
+}
+.avail-dot{width:7px;height:7px;background:#4ade80;border-radius:50%;animation:pulse 2s infinite;flex-shrink:0}
+.contact-form-heading{
+  font-family:var(--font-mono);font-size:10px;
+  color:var(--red);letter-spacing:0.2em;text-transform:uppercase;
+  margin-bottom:18px;display:flex;align-items:center;gap:10px;
+}
+.contact-form-heading::after{content:'';flex:1;height:1px;background:rgba(230,57,70,0.2);max-width:120px}
+
+/* ── KEYFRAMES ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:none}}
+@keyframes scrollAnim{0%{transform:translateX(-100%)}50%{transform:translateX(0)}100%{transform:translateX(100%)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+
+/* ── RESPONSIVE ── */
+@media(max-width:900px){
+  nav{padding:16px 24px}
+  .nav-links{display:none}
+  #hero{grid-template-columns:1fr;padding:100px 24px 60px}
+  .hero-right{display:none}
+  .hero-scroll{left:24px}
+  section,#github{padding:80px 24px}
+  .about-grid,.contact-inner,.skills-layout{grid-template-columns:1fr;gap:40px}
+  .projects-grid,.github-repos{grid-template-columns:1fr}
+  .certs-grid{grid-template-columns:1fr}
+  footer{padding:24px;flex-direction:column;gap:8px;text-align:center}
+}
+</style>
+</head>
+<body>
+
+<nav id="navbar">
+  <div class="nav-logo">KP</div>
+  <div class="nav-right">
+    <ul class="nav-links" id="nav-links">
+      <li><a href="#about" data-i18n="nav0">About</a></li>
+      <li><a href="#github" data-i18n="nav1">GitHub</a></li>
+      <li><a href="#projects" data-i18n="nav2">Projects</a></li>
+      <li><a href="#certifications" data-i18n="nav3">Certs</a></li>
+      <li><a href="#skills" data-i18n="nav4">Skills</a></li>
+      <li><a href="#contact" data-i18n="nav5">Contact</a></li>
+    </ul>
+    <div class="lang-toggle">
+      <button class="lang-btn active" id="btn-en" onclick="setLang('en')">EN</button>
+      <button class="lang-btn" id="btn-jp" onclick="setLang('jp')">JP</button>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section id="hero">
+  <div class="hero-bg-grid"></div>
+  <div class="hero-orb orb1"></div>
+  <div class="hero-orb orb2"></div>
+
+  <div class="hero-left">
+    <div class="hero-tag" data-i18n="heroTag">Full-Stack Web Developer</div>
+    <h1 class="hero-name">Kyle Porter</h1>
+    <p class="hero-sub" data-i18n="heroSub">Building production-grade web experiences — from modern Next.js apps to Rails-backed platforms serving real audiences.</p>
+    <div class="hero-ctas">
+      <a href="#projects" class="btn-primary" data-i18n="heroCta1">View Projects →</a>
+      <a href="#contact" class="btn-ghost" data-i18n="heroCta2">Get in touch</a>
+      <a href="https://github.com/rrblack" target="_blank" rel="noopener noreferrer" class="btn-gh" aria-label="GitHub">
+        <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.49.5.09.68-.22.68-.48v-1.69C6.86 19.86 6.3 18 6.3 18c-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.56 9.56 0 0112 7.43a9.56 9.56 0 012.5.34c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10.01 10.01 0 0022 12c0-5.52-4.48-10-10-10z"/></svg>
+        rrblack
+      </a>
+    </div>
+  </div>
+
+  <div class="hero-right">
+    <div class="hero-dash-block">
+      <div class="hero-dash-label" data-i18n="heroCardStack">Stack</div>
+      <div class="hero-stack-pills">
+        <span class="hero-stack-pill">Next.js</span>
+        <span class="hero-stack-pill">React</span>
+        <span class="hero-stack-pill">Ruby on Rails</span>
+        <span class="hero-stack-pill">TypeScript</span>
+        <span class="hero-stack-pill">PostgreSQL</span>
+        <span class="hero-stack-pill">Tailwind CSS</span>
+        <span class="hero-stack-pill">AWS</span>
+        <span class="hero-stack-pill">Docker</span>
+        <span class="hero-stack-pill">Vercel</span>
+      </div>
+    </div>
+    <div class="hero-dash-block">
+      <div class="hero-dash-label" data-i18n="heroCardCreds">Credentials</div>
+      <div class="hero-creds-grid">
+        <div class="hero-cred"><div class="hero-cred-badge">CLF</div><div class="hero-cred-label" data-i18n="credCLF">AWS Cloud Practitioner</div></div>
+        <div class="hero-cred"><div class="hero-cred-badge">DVA</div><div class="hero-cred-label" data-i18n="credDVA">AWS Developer Associate</div></div>
+        <div class="hero-cred"><div class="hero-cred-badge">AIF</div><div class="hero-cred-label" data-i18n="credAIF">AWS AI Practitioner</div></div>
+        <div class="hero-cred"><div class="hero-cred-badge">N1</div><div class="hero-cred-label" data-i18n="credN1">JLPT Japanese</div></div>
+      </div>
+    </div>
+    <div class="hero-dash-block hero-dash-grow">
+      <div class="hero-dash-label" data-i18n="heroCardLive">Live Projects</div>
+      <div class="hero-live-list">
+        <div class="hero-live-item">
+          <div>
+            <div class="hero-live-name">Moapro</div>
+            <div class="hero-live-sub" data-i18n="heroLiveSub">Bigo Live streamer-management site — Next.js 16</div>
+          </div>
+          <span class="live-dot" title="Live"></span>
+        </div>
+        <div class="hero-live-item">
+          <div>
+            <div class="hero-live-name">Kyle's Japan Life</div>
+            <div class="hero-live-sub" data-i18n="heroLiveSub2">Bilingual blog — Next.js 14 + Supabase</div>
+          </div>
+          <span class="live-dot" title="Live"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hero-scroll">
+    <div class="scroll-line"></div>
+    <span data-i18n="scrollLabel">Scroll</span>
+  </div>
+</section>
+
+<!-- ABOUT -->
+<section id="about">
+  <div class="section-label" data-i18n="aboutLabel">About</div>
+  <div class="section-title reveal" data-i18n="aboutTitle">Who I am</div>
+  <div class="about-grid">
+    <div>
+      <div class="about-text reveal reveal-delay-1" id="about-text">
+        <p>I'm <strong>Kyle Porter</strong>, a <span class="accent">Full-Stack Web Developer</span> with a passion for building polished, production-ready applications that actually ship.</p>
+        <p>From <strong>Next.js streaming platforms</strong> to <strong>Ruby on Rails client sites</strong>, I build for real users and real businesses.</p>
+        <p>I hold the <span class="accent">JLPT N1</span> certification — the highest level of Japanese language proficiency — alongside three AWS certifications.</p>
+      </div>
+      <div class="about-stats reveal reveal-delay-2">
+        <div class="stat"><div class="stat-num">3</div><div class="stat-label" data-i18n="statLbl1">Production Projects</div></div>
+        <div class="stat"><div class="stat-num">2</div><div class="stat-label" data-i18n="statLbl2">Production Clients</div></div>
+        <div class="stat"><div class="stat-num">4</div><div class="stat-label" data-i18n="statLbl3">Certifications</div></div>
+        <div class="stat"><div class="stat-num">N1</div><div class="stat-label" data-i18n="statLbl4">Japanese Level</div></div>
+      </div>
+    </div>
+    <div class="about-side reveal reveal-delay-2">
+      <div class="about-photo">
+        <img src="photos/biopicture.jpeg" alt="Kyle Porter">
+        <div class="about-photo-corner"></div>
+      </div>
+      <div class="about-side-card">
+        <div class="about-side-title" data-i18n="keyProjectsTitle">Key Projects</div>
+        <div class="about-side-list">
+          <div class="about-side-item" data-i18n="keyProj1">Moapro — Streamer management site (Next.js)</div>
+          <div class="about-side-item" data-i18n="keyProj2">Kyle's Japan Life — Personal blog (Next.js)</div>
+          <div class="about-side-item" data-i18n="keyProj3">Model Portfolio — Influencer site (Rails)</div>
+        </div>
+      </div>
+      <div class="about-side-card">
+        <div class="about-side-title" data-i18n="certsListTitle">Certifications</div>
+        <div class="about-side-list">
+          <div class="about-side-item">AWS Cloud Practitioner</div>
+          <div class="about-side-item">AWS Developer Associate</div>
+          <div class="about-side-item">AWS AI Practitioner</div>
+          <div class="about-side-item" data-i18n="certN1Item">JLPT N1 — Japanese Fluency</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- GITHUB -->
+<section id="github">
+  <div class="section-label">GitHub</div>
+  <div class="github-header reveal">
+    <div>
+      <div class="section-title" data-i18n="githubTitle">Activity</div>
+      <div class="github-contrib-count">
+        <strong id="contrib-total">—</strong>
+        <span data-i18n="contribSuffix">contributions in the last year</span>
+      </div>
+    </div>
+    <a href="https://github.com/rrblack" target="_blank" rel="noopener noreferrer" class="github-link-pill">
+      <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.49.5.09.68-.22.68-.48v-1.69C6.86 19.86 6.3 18 6.3 18c-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.56 9.56 0 0112 7.43a9.56 9.56 0 012.5.34c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10.01 10.01 0 0022 12c0-5.52-4.48-10-10-10z"/></svg>
+      rrblack
+    </a>
+  </div>
+
+  <div class="reveal reveal-delay-1">
+    <div id="heatmap-container">
+      <div class="heatmap-loading" data-i18n="heatmapLoading">Loading GitHub activity...</div>
+    </div>
+  </div>
+
+  <div class="github-repos reveal reveal-delay-2" id="github-repos"></div>
+</section>
+
+<!-- PROJECTS -->
+<section id="projects">
+  <div class="section-label" data-i18n="projectsLabel">Projects</div>
+  <div class="section-title reveal" data-i18n="projectsTitle">What I've built</div>
+  <div class="projects-grid" id="projects-grid"></div>
+</section>
+
+<!-- CERTIFICATIONS -->
+<section id="certifications">
+  <div class="section-label" data-i18n="certsLabel">Certifications</div>
+  <div class="section-title reveal" data-i18n="certsTitle">Credentials</div>
+  <div class="certs-grid" id="certs-grid"></div>
+</section>
+
+<!-- SKILLS -->
+<section id="skills">
+  <div class="section-label" data-i18n="skillsLabel">Skills</div>
+  <div class="section-title reveal" data-i18n="skillsTitle">My toolkit</div>
+  <div class="skills-layout">
+    <div class="reveal reveal-delay-1">
+      <div class="skills-col-title" data-i18n="skillsCol1">Core proficiencies</div>
+      <div id="skills-bars"></div>
+    </div>
+    <div class="reveal reveal-delay-2">
+      <div class="skills-col-title" data-i18n="skillsCol2">Technologies</div>
+      <div class="tech-cloud" id="tech-cloud"></div>
+    </div>
+  </div>
+</section>
+
+<!-- CONTACT -->
+<section id="contact">
+  <div class="section-label" data-i18n="contactLabel">Contact</div>
+  <div class="section-title reveal" data-i18n="contactTitle">Let's work</div>
+  <div class="contact-inner">
+    <div class="reveal reveal-delay-1">
+      <div class="contact-copy"><p data-i18n="contactCopy">Got a project in mind or want to talk tech? I'm open to new opportunities and collaborations.</p></div>
+      <div class="contact-status">
+        <div class="contact-status-row">
+          <div class="contact-status-label" data-i18n="availLabel">Status</div>
+          <div class="contact-status-value"><span class="avail-dot"></span><span data-i18n="availValue">Open to new opportunities</span></div>
+        </div>
+        <div class="contact-status-row">
+          <div class="contact-status-label" data-i18n="locationLabel">Location</div>
+          <div class="contact-status-value" data-i18n="locationValue">Tokyo, Japan — JST (UTC+9)</div>
+        </div>
+        <div class="contact-status-row">
+          <div class="contact-status-label" data-i18n="responseLabel">Response</div>
+          <div class="contact-status-value" data-i18n="responseValue">Usually within 24 hours</div>
+        </div>
+        <div class="contact-status-row">
+          <div class="contact-status-label" data-i18n="langLabel">Languages</div>
+          <div class="contact-status-value" data-i18n="langValue">English · 日本語 (JLPT N1)</div>
+        </div>
+      </div>
+      <div class="contact-links">
+        <a href="https://github.com/rrblack" target="_blank" rel="noopener noreferrer" class="contact-link">
+          <div class="contact-link-icon">
+            <svg width="15" height="15" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.49.5.09.68-.22.68-.48v-1.69C6.86 19.86 6.3 18 6.3 18c-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.56 9.56 0 0112 7.43a9.56 9.56 0 012.5.34c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10.01 10.01 0 0022 12c0-5.52-4.48-10-10-10z"/></svg>
+          </div>
+          github.com/rrblack
+        </a>
+        <a href="https://www.linkedin.com/in/kyledanielporter/" target="_blank" rel="noopener noreferrer" class="contact-link">
+          <div class="contact-link-icon">
+            <svg width="15" height="15" fill="currentColor" viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2zM9 17H6.5v-7H9v7zM7.75 8.56a1.44 1.44 0 110-2.88 1.44 1.44 0 010 2.88zM18 17h-2.5v-3.5c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5V17H10v-7h2.5v1c.46-.69 1.23-1 2-1 1.65 0 3 1.35 3 3V17z"/></svg>
+          </div>
+          linkedin.com/in/kyledanielporter
+        </a>
+      </div>
+    </div>
+    <div class="reveal reveal-delay-2">
+      <div class="contact-form-heading" data-i18n="formHeading">Send a direct message</div>
+      <div class="form-success" id="form-success">
+        <div class="success-icon">✓</div>
+        <h3 data-i18n="successTitle">Message sent</h3>
+        <p data-i18n="successMsg">Thanks for reaching out, I'll get back to you soon.</p>
+      </div>
+      <form class="contact-form" id="contact-form">
+        <div class="form-group">
+          <label class="form-label" data-i18n="formName">Name</label>
+          <input class="form-input" type="text" id="form-name" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label" data-i18n="formEmail">Email</label>
+          <input class="form-input" type="email" id="form-email" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label" data-i18n="formMsg">Message</label>
+          <textarea class="form-input" id="form-message" required></textarea>
+        </div>
+        <button type="submit" class="btn-primary" style="align-self:flex-start" data-i18n="formBtn">Send Message →</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<div class="modal-root" id="project-modal" role="dialog" aria-modal="true" aria-hidden="true"></div>
+
+<footer>
+  <div class="footer-copy" data-i18n="footerLeft">© 2026 Kyle Porter</div>
+  <div class="footer-copy" data-i18n="footerRight">Full-Stack Web Developer</div>
+</footer>
+
+<script>
+// ── i18n ─────────────────────────────────────────────────────────────────────
+const T = {
+  en: {
+    nav0:'About',nav1:'GitHub',nav2:'Projects',nav3:'Certs',nav4:'Skills',nav5:'Contact',
+    heroTag:'Full-Stack Web Developer',
+    heroSub:"Building production-grade web experiences — from modern Next.js apps to Rails-backed platforms serving real audiences.",
+    heroCta1:'View Projects →',heroCta2:'Get in touch',
+    heroCardStack:'Stack',heroCardCreds:'Credentials',heroCardLive:'Live Projects',
+    heroLiveSub:'Bigo Live streamer-management site — Next.js 16',
+    heroLiveSub2:'Bilingual blog — Next.js 14 + Supabase',
+    liveStatus:'Production',
+    credCLF:'AWS Cloud Practitioner',credDVA:'AWS Developer Associate',
+    credAIF:'AWS AI Practitioner',credN1:'JLPT Japanese',
+    scrollLabel:'Scroll',
+    aboutLabel:'About',aboutTitle:'Who I am',
+    aboutP1:"I'm <strong>Kyle Porter</strong>, a <span class=\"accent\">Full-Stack Web Developer</span> with a passion for building polished, production-ready applications that actually ship.",
+    aboutP2:"From <strong>Next.js sites for Bigo Live partners</strong> to <strong>Ruby on Rails builds for clients like professional models with 40k+ followers</strong>, I ship for real businesses.",
+    aboutP3:"I hold the <span class=\"accent\">JLPT N1</span> certification — the highest level of Japanese language proficiency — alongside three AWS certifications.",
+    statLbl1:'Production Projects',statLbl2:'Production Clients',statLbl3:'Certifications',statLbl4:'Japanese Level',
+    keyProjectsTitle:'Key Projects',certsListTitle:'Certifications',
+    keyProj1:'Moapro — Streamer management site (Next.js)',
+    keyProj2:"Kyle's Japan Life — Personal blog (Next.js)",
+    keyProj3:'Model Portfolio — Influencer site (Rails)',
+    certN1Item:'JLPT N1 — Japanese Fluency',
+    githubTitle:'Activity',contribSuffix:'contributions in the last year',
+    heatmapLoading:'Loading GitHub activity...',
+    projectsLabel:'Projects',projectsTitle:"What I've built",
+    visitLink:'Visit Site →',detailsLink:'View details →',githubLink:'View on GitHub',
+    metaRole:'Role',metaYear:'Year',metaDeploy:'Deploy',metaStatus:'Status',
+    sectionStack:'Stack',sectionBackstory:'Backstory',sectionHighlights:'Highlights',
+    certsLabel:'Certifications',certsTitle:'Credentials',
+    skillsLabel:'Skills',skillsTitle:'My toolkit',
+    skillsCol1:'Core proficiencies',skillsCol2:'Technologies',
+    contactLabel:'Contact',contactTitle:"Let's work",
+    contactCopy:"Got a project in mind or want to talk tech? I'm open to new opportunities and collaborations.",
+    availLabel:'Status',availValue:'Open to new opportunities',
+    locationLabel:'Location',locationValue:'Tokyo, Japan — JST (UTC+9)',
+    responseLabel:'Response',responseValue:'Usually within 24 hours',
+    langLabel:'Languages',langValue:'English · 日本語 (JLPT N1)',
+    formHeading:'Send a direct message',
+    formName:'Name',formEmail:'Email',formMsg:'Message',
+    formPlName:'Your name',formPlEmail:'your@email.com',formPlMsg:"What's on your mind?",
+    formBtn:'Send Message →',
+    successTitle:'Message sent',successMsg:"Thanks for reaching out, I'll get back to you soon.",
+    footerLeft:'© 2026 Kyle Porter',footerRight:'Full-Stack Web Developer',
+    liveStatusBadge:'Live in production',
+    projects:[
+      {
+        name:'Model Portfolio Site',img:'modelsite.png',url:'https://model-project-ruby.onrender.com/',github:'https://github.com/rrblack/model-project-ruby',
+        desc:'Rails portfolio for a Japan-based model client, discovered via social recommendation. A deliberate step outside Next.js to broaden full-stack range.',
+        tags:['Ruby on Rails','Portfolio','Client Work'],
+        detail:{
+          tagline:'Rails portfolio for a Japan-based model discovered via social recommendation.',
+          role:'Solo Full-Stack',year:'2025',deploy:'Render',statusLabel:'Active Development',
+          stack:['Ruby on Rails','PostgreSQL','Hotwire + Stimulus','Tailwind CSS (ERB)'],
+          backstory:"The client found me through a social media recommendation. Rather than defaulting to Next.js for a third project, I chose Rails deliberately — it has a different architectural philosophy and understanding that difference makes me a stronger full-stack developer. The project is both real client delivery and active learning.",
+          highlights:['Ruby on Rails full-stack with PostgreSQL','Hotwire + Stimulus for interactivity without a SPA','Tailwind integrated with ERB templates','Deliberate step beyond primary Next.js stack','Active development with live client feedback']
+        }
+      },
+      {
+        name:'Moapro',img:'photos/moapro.png',url:'https://moapro.jp/',github:'https://github.com/rrblack/client_project',
+        desc:'Solo-built corporate site for MOA Pro — a Tokyo-based talent-management company that signs streamers for Bigo Live. Designed, coded, and shipped end-to-end.',
+        tags:['Next.js','Production','Client Work'],status:true,
+        detail:{
+          tagline:'Solo-built corporate site for a Bigo Live streamer-management company.',
+          role:'Solo Full-Stack',year:'2025',deploy:'Cloudflare Pages',statusLabel:'Live',
+          stack:['Next.js 16 (App Router)','TypeScript','Tailwind CSS','Cloudflare Pages'],
+          backstory:"MOA Pro is a Tokyo-based live-stream management company partnered with Bigo Live — not a streaming platform itself, but the talent-management agency behind the streamers. I took the project from client discovery through bespoke design, implementation, iterative feedback, and production deployment as a single developer.",
+          highlights:['Custom design from scratch — no templates','Corporate site: company, services, about','Functional inquiry contact form','Fully responsive (mobile + desktop)','Performance-tuned via Next.js App Router + Cloudflare edge']
+        }
+      },
+      {
+        name:"Kyle's Japan Life",img:'photos/blogen.png',imgFit:'contain',url:'https://www.kylesjapan.life/',github:'https://github.com/rrblack/blog-starter-app',
+        desc:'Bilingual (EN/JP) personal blog about life, travel, and language in Japan. Rebuilt from scratch after outgrowing WordPress — zero-cost hosting, full ownership.',
+        tags:['Next.js','Blog','SSG'],status:true,
+        detail:{
+          tagline:'Bilingual blog on Japanese life, travel, and language — rebuilt from WordPress for zero-cost hosting and full ownership.',
+          role:'Solo Full-Stack',year:'2022 → ongoing',deploy:'Cloudflare Pages',statusLabel:'Live',
+          stack:['Next.js 14 (App Router)','TypeScript','Supabase (PostgreSQL)','MDX','Tailwind CSS','DeepL API','Cloudflare Pages'],
+          backstory:"Started as a WordPress site when I moved to Japan in 2022. After transitioning into IT and teaching myself web development, I rebuilt everything from scratch — design, code, deployment. Goals: full ownership, zero ongoing hosting cost, and a real production project to build on. Covers life as an American in Japan, the JLPT N1 journey, travel across Asia, and the cultural day-to-day.",
+          highlights:['Full EN/JP bilingual with DeepL API translation','MDX article system — Markdown with embedded React','Nested comment + reply threading on Supabase','Tag filtering, auto reading-time, image lightbox','Newsletter with subscriber dispatches','Zero-cost hosting via Cloudflare Pages']
+        }
+      },
+    ],
+    certs:[
+      {issuer:'Amazon Web Services',name:'AWS Certified Cloud Practitioner',icon:'CLF',desc:'CLF-C02 — Foundational understanding of AWS Cloud services, architecture, security, and pricing.'},
+      {issuer:'Amazon Web Services',name:'AWS Certified Developer – Associate',icon:'DVA',desc:'DVA-C02 — Developing, deploying, and debugging cloud-based applications on AWS.'},
+      {issuer:'Amazon Web Services',name:'AWS Certified AI Practitioner',icon:'AIF',desc:'AIF-C01 — Core concepts of AI, ML, and generative AI services in the AWS ecosystem.'},
+      {issuer:'Japan Language Proficiency Test',name:'JLPT N1',icon:'N1',desc:'Highest level JLPT certification — full professional fluency in Japanese.'},
+    ],
+    skills:[
+      {name:'Next.js / React',pct:92},{name:'Ruby on Rails',pct:82},
+      {name:'JavaScript / TypeScript',pct:90},{name:'PostgreSQL',pct:80},
+      {name:'AWS Cloud',pct:85},{name:'CSS / Tailwind',pct:88},
+    ],
+    repos:[
+      {name:'moapro',desc:'Corporate site for a Bigo Live streamer-management company — full production Next.js.',lang:'TypeScript',url:'https://github.com/rrblack/client_project'},
+      {name:'kylesjapanlife',desc:'Bilingual personal blog built with Next.js 14 + Supabase.',lang:'TypeScript',url:'https://github.com/rrblack/blog-starter-app'},
+      {name:'model-portfolio',desc:'Ruby on Rails portfolio site for a Japan-based model client.',lang:'Ruby',url:'https://github.com/rrblack/model-project-ruby'},
+    ],
+  },
+  jp:{
+    nav0:'について',nav1:'GitHub',nav2:'プロジェクト',nav3:'資格',nav4:'スキル',nav5:'お問い合わせ',
+    heroTag:'フルスタック Web 開発者',
+    heroSub:'モダンな Next.js アプリケーションから Ruby on Rails のクライアントサイトまで、実ユーザー向けに本番環境で動くプロダクトを構築しています。',
+    heroCta1:'プロジェクトを見る →',heroCta2:'お問い合わせ',
+    heroCardStack:'使用技術',heroCardCreds:'資格・認定',heroCardLive:'本番稼働プロジェクト',
+    heroLiveSub:'Bigo Live 配信者マネジメント会社のサイト — Next.js 16',
+    heroLiveSub2:'バイリンガルブログ — Next.js 14 + Supabase',
+    liveStatus:'本番稼働中',
+    credCLF:'AWS クラウドプラクティショナー',credDVA:'AWS デベロッパーアソシエイト',
+    credAIF:'AWS AI プラクティショナー',credN1:'日本語能力試験 N1',
+    scrollLabel:'スクロール',
+    aboutLabel:'について',aboutTitle:'自己紹介',
+    aboutP1:"私は<strong>カイル・ポーター</strong>です。完成度の高いプロダクトを本番環境で届けることに情熱を持つ<span class=\"accent\">フルスタック Web 開発者</span>です。",
+    aboutP2:"<strong>Bigo Live パートナー向けの Next.js サイト</strong>から<strong>フォロワー 4 万人超のプロモデル向け Ruby on Rails 制作</strong>まで、実際のビジネスのためにプロダクトを届けています。",
+    aboutP3:"AWS 認定を 3 つ取得しており、<span class=\"accent\">JLPT N1</span>（日本語能力試験最高級）も保有しています。",
+    statLbl1:'本番プロジェクト',statLbl2:'本番クライアント',statLbl3:'資格取得数',statLbl4:'日本語レベル',
+    keyProjectsTitle:'主要プロジェクト',certsListTitle:'資格・認定',
+    keyProj1:'Moapro — 配信者マネジメントサイト (Next.js)',
+    keyProj2:"Kyle's Japan Life — パーソナルブログ (Next.js)",
+    keyProj3:'モデルポートフォリオ — インフルエンサー向けサイト (Rails)',
+    certN1Item:'JLPT N1 — 日本語能力試験最高級',
+    githubTitle:'アクティビティ',contribSuffix:'過去 1 年間のコントリビューション',
+    heatmapLoading:'GitHub アクティビティを読み込み中...',
+    projectsLabel:'プロジェクト',projectsTitle:'制作実績',
+    visitLink:'サイトを見る →',detailsLink:'詳細を見る →',githubLink:'GitHub で見る',
+    metaRole:'役割',metaYear:'年',metaDeploy:'デプロイ',metaStatus:'ステータス',
+    sectionStack:'技術スタック',sectionBackstory:'背景',sectionHighlights:'ハイライト',
+    certsLabel:'資格',certsTitle:'取得資格',
+    skillsLabel:'スキル',skillsTitle:'技術スタック',
+    skillsCol1:'主要スキル',skillsCol2:'使用技術一覧',
+    contactLabel:'お問い合わせ',contactTitle:'一緒に働きましょう',
+    contactCopy:'プロジェクトのご相談や技術的な話がしたい方は、お気軽にご連絡ください。新しい機会やコラボレーションを歓迎しています。',
+    availLabel:'ステータス',availValue:'新しい案件受付中',
+    locationLabel:'所在地',locationValue:'東京（JST / UTC+9）',
+    responseLabel:'返信目安',responseValue:'通常 24 時間以内',
+    langLabel:'言語',langValue:'English · 日本語（JLPT N1）',
+    formHeading:'直接メッセージを送る',
+    formName:'お名前',formEmail:'メールアドレス',formMsg:'メッセージ',
+    formPlName:'お名前を入力',formPlEmail:'メールアドレスを入力',formPlMsg:'ご用件をお書きください',
+    formBtn:'送信する →',
+    successTitle:'送信完了',successMsg:'ご連絡いただきありがとうございます。後ほどご返信いたします。',
+    footerLeft:'© 2026 Kyle Porter',footerRight:'フルスタック Web 開発者',
+    liveStatusBadge:'本番稼働中',
+    projects:[
+      {
+        name:'モデルポートフォリオサイト',img:'modelsite.png',url:'https://model-project-ruby.onrender.com/',github:'https://github.com/rrblack/model-project-ruby',
+        desc:'日本在住モデルのクライアント案件。SNS 経由の紹介で依頼を受け、Next.js 一辺倒から脱却すべく Rails を選択。',
+        tags:['Ruby on Rails','ポートフォリオ','クライアント案件'],
+        detail:{
+          tagline:'SNS 経由で依頼を受けたモデルのポートフォリオサイトを Rails で制作。',
+          role:'1 人フルスタック',year:'2025',deploy:'Render',statusLabel:'開発中',
+          stack:['Ruby on Rails','PostgreSQL','Hotwire + Stimulus','Tailwind CSS (ERB)'],
+          backstory:'モデルのクライアントは SNS 経由の紹介で依頼をいただきました。3 度目となる Next.js ではなく、あえて Rails を選択。Rails は設計思想が Next.js と異なり、その違いを理解することでフルスタック開発者として視野が広がります。本案件はリアルなクライアント案件であると同時に、フレームワークが考え方をどう形作るかを学ぶ実践の場でもあります。',
+          highlights:['Ruby on Rails + PostgreSQL によるフルスタック構成','Hotwire + Stimulus で SPA 化せずインタラクティブ実装','Tailwind を ERB テンプレートと統合','主軸 Next.js からの意識的な領域拡張','リアルクライアントとの継続開発中']
+        }
+      },
+      {
+        name:'Moapro',img:'photos/moapro.png',url:'https://moapro.jp/',github:'https://github.com/rrblack/client_project',
+        desc:'Bigo Live と提携する東京のタレントマネジメント会社 MOA Pro のコーポレートサイト。デザインから実装・本番デプロイまで 1 人で完遂。',
+        tags:['Next.js','本番環境','クライアント案件'],status:true,
+        detail:{
+          tagline:'Bigo Live 提携の配信者マネジメント会社のコーポレートサイトを単独制作。',
+          role:'1 人フルスタック',year:'2025',deploy:'Cloudflare Pages',statusLabel:'稼働中',
+          stack:['Next.js 16 (App Router)','TypeScript','Tailwind CSS','Cloudflare Pages'],
+          backstory:'MOA Pro は Bigo Live と提携する東京のライブ配信マネジメント会社です。配信プラットフォーム自体ではなく、配信者を支えるタレントマネジメント会社という位置づけ。ヒアリングからオリジナルデザイン、実装、クライアントフィードバック反映、本番デプロイまでを 1 人で担当しました。',
+          highlights:['テンプレート不使用、完全オリジナルデザイン','会社概要・サービス・紹介ページのコーポレート構成','問い合わせフォームの実装','モバイル・デスクトップ両対応','Next.js App Router + Cloudflare Edge でパフォーマンス最適化']
+        }
+      },
+      {
+        name:"Kyle's Japan Life",img:'photos/blogjp.png',imgFit:'contain',url:'https://www.kylesjapan.life/',github:'https://github.com/rrblack/blog-starter-app',
+        desc:'日本での生活・旅行・語学を綴るバイリンガルブログ。WordPress を卒業してゼロから再構築し、ゼロコストホスティングで完全自己管理。',
+        tags:['Next.js','ブログ','SSG'],status:true,
+        detail:{
+          tagline:'日本での生活・旅行・言語学習のバイリンガルブログ。WordPress から脱却し、ゼロコストホスティングで完全自己管理。',
+          role:'1 人フルスタック',year:'2022 → 継続中',deploy:'Cloudflare Pages',statusLabel:'稼働中',
+          stack:['Next.js 14 (App Router)','TypeScript','Supabase (PostgreSQL)','MDX','Tailwind CSS','DeepL API','Cloudflare Pages'],
+          backstory:'2022 年に日本へ移住した時点で WordPress として始めたブログ。IT 業界へ転身し Web 開発を独学する中で、デザインから実装・デプロイまで一切を 1 人でやり直しました。完全な自己管理、ランニングコストゼロ、そして本番で動くプロジェクトを持つこと — それが目標です。アメリカ人から見た日本、JLPT N1 までの日本語学習、旅、日常文化などを扱います。',
+          highlights:['DeepL API で日英完全バイリンガル','MDX で Markdown に React を埋め込み','Supabase でネスト型コメント・返信スレッド','タグフィルタ、読了時間自動計算、画像ライトボックス','ニュースレター配信機能','Cloudflare Pages によるゼロコストホスティング']
+        }
+      },
+    ],
+    certs:[
+      {issuer:'Amazon Web Services',name:'AWS 認定クラウドプラクティショナー',icon:'CLF',desc:'CLF-C02 — AWS クラウドサービスのアーキテクチャ、セキュリティ、料金体系に関する基礎的な理解。'},
+      {issuer:'Amazon Web Services',name:'AWS 認定デベロッパー – アソシエイト',icon:'DVA',desc:'DVA-C02 — AWS 上でのクラウドアプリケーションの開発・デプロイ・デバッグ。'},
+      {issuer:'Amazon Web Services',name:'AWS 認定 AI プラクティショナー',icon:'AIF',desc:'AIF-C01 — AWS エコシステムにおける AI・ML・生成 AI サービスのコアコンセプト。'},
+      {issuer:'日本語能力試験',name:'JLPT N1',icon:'N1',desc:'日本語能力試験の最高級。完全なプロフェッショナルレベルの日本語運用能力を証明。'},
+    ],
+    skills:[
+      {name:'Next.js / React',pct:92},{name:'Ruby on Rails',pct:82},
+      {name:'JavaScript / TypeScript',pct:90},{name:'PostgreSQL',pct:80},
+      {name:'AWS クラウド',pct:85},{name:'CSS / Tailwind',pct:88},
+    ],
+    repos:[
+      {name:'moapro',desc:'Bigo Live 提携の配信者マネジメント会社のコーポレートサイト — 本番 Next.js。',lang:'TypeScript',url:'https://github.com/rrblack/client_project'},
+      {name:'kylesjapanlife',desc:'Next.js 14 + Supabase のバイリンガル個人ブログ。',lang:'TypeScript',url:'https://github.com/rrblack/blog-starter-app'},
+      {name:'model-portfolio',desc:'日本在住モデル向けの Ruby on Rails ポートフォリオサイト。',lang:'Ruby',url:'https://github.com/rrblack/model-project-ruby'},
+    ],
+  },
+};
+
+const TECH_PILLS = ["HTML5","CSS3","React","Next.js","Ruby","Rails","PostgreSQL","MySQL","AWS","Vercel","Git","GitHub","REST APIs","GraphQL","Docker","TypeScript","Tailwind CSS"];
+
+let lang = 'en';
+
+// ── Render dynamic content ──────────────────────────────────────────────────
+function renderProjects() {
+  const t = T[lang];
+  document.getElementById('projects-grid').innerHTML = t.projects.map((p,i) => `
+    <div class="project-card reveal reveal-delay-${i+1}"
+         style="cursor:pointer"
+         onclick="openProjectModal(${i})">
+      <div class="card-img">
+        ${p.img
+          ? `<img src="${p.img}" alt="${p.name}"
+               style="width:100%;height:100%;object-fit:${p.imgFit||'cover'};display:block;background:var(--surface2)">`
+          : `<div class="card-img-stripe"></div><div class="card-img-label">[ ${p.name} ]</div>`
+        }
+        <div class="card-overlay"></div>
+      </div>
+      <div class="card-body">
+        ${p.status ? `<div class="card-status"><span class="status-dot"></span>${t.liveStatusBadge}</div>` : ''}
+        <div class="card-tags">${p.tags.map(tag=>`<span class="tag">${tag}</span>`).join('')}</div>
+        <div class="card-title">${p.name}</div>
+        <div class="card-desc">${p.desc}</div>
+        <div style="display:flex;gap:16px;align-items:center">
+          <span class="card-link">${t.detailsLink}</span>
+          <a href="${p.github}" target="_blank" rel="noopener noreferrer" class="card-link-gh"
+             onclick="event.stopPropagation()" title="View on GitHub">
+            <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.49.5.09.68-.22.68-.48v-1.69C6.86 19.86 6.3 18 6.3 18c-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.64-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.56 9.56 0 0112 7.43a9.56 9.56 0 012.5.34c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10.01 10.01 0 0022 12c0-5.52-4.48-10-10-10z"/></svg>
+          </a>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Project modal ───────────────────────────────────────────────────────────
+function openProjectModal(index) {
+  const t = T[lang];
+  const p = t.projects[index];
+  if (!p || !p.detail) return;
+  const d = p.detail;
+  const modal = document.getElementById('project-modal');
+  modal.innerHTML = `
+    <div class="modal-backdrop" onclick="closeProjectModal()"></div>
+    <div class="modal-panel" role="document">
+      <button class="modal-close" onclick="closeProjectModal()" aria-label="Close">×</button>
+      <div class="modal-hero">
+        ${p.img
+          ? `<img src="${p.img}" alt="${p.name}" style="object-fit:${p.imgFit||'cover'}">`
+          : `<div class="card-img-stripe"></div>`}
+      </div>
+      <div class="modal-body">
+        ${p.status ? `<div class="modal-status"><span class="status-dot"></span>${t.liveStatusBadge}</div>` : ''}
+        <h2 class="modal-title">${p.name}</h2>
+        <p class="modal-tagline">${d.tagline}</p>
+        <div class="modal-meta">
+          <div class="modal-meta-cell"><div class="modal-meta-label">${t.metaRole}</div><div class="modal-meta-val">${d.role}</div></div>
+          <div class="modal-meta-cell"><div class="modal-meta-label">${t.metaYear}</div><div class="modal-meta-val">${d.year}</div></div>
+          <div class="modal-meta-cell"><div class="modal-meta-label">${t.metaDeploy}</div><div class="modal-meta-val">${d.deploy}</div></div>
+          <div class="modal-meta-cell"><div class="modal-meta-label">${t.metaStatus}</div><div class="modal-meta-val">${d.statusLabel}</div></div>
+        </div>
+        <div class="modal-section">
+          <div class="modal-section-title">${t.sectionStack}</div>
+          <div class="modal-stack-row">${d.stack.map(s=>`<span class="modal-stack-pill">${s}</span>`).join('')}</div>
+        </div>
+        <div class="modal-section">
+          <div class="modal-section-title">${t.sectionBackstory}</div>
+          <p class="modal-paragraph">${d.backstory}</p>
+        </div>
+        <div class="modal-section">
+          <div class="modal-section-title">${t.sectionHighlights}</div>
+          <ul class="modal-list">${d.highlights.map(h=>`<li>${h}</li>`).join('')}</ul>
+        </div>
+        <div class="modal-actions">
+          <a href="${p.url}" target="_blank" rel="noopener noreferrer" class="btn-primary">${t.visitLink}</a>
+          <a href="${p.github}" target="_blank" rel="noopener noreferrer" class="btn-ghost">${t.githubLink}</a>
+        </div>
+      </div>
+    </div>
+  `;
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden','false');
+  document.body.style.overflow = 'hidden';
+}
+function closeProjectModal() {
+  const modal = document.getElementById('project-modal');
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden','true');
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeProjectModal();
+});
+
+function renderCerts() {
+  const t = T[lang];
+  document.getElementById('certs-grid').innerHTML = t.certs.map((c,i) => `
+    <div class="cert-card reveal reveal-delay-${i%2+1}">
+      <div class="cert-icon">${c.icon}</div>
+      <div>
+        <div class="cert-issuer">${c.issuer}</div>
+        <div class="cert-name">${c.name}</div>
+        <div class="cert-desc">${c.desc}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderSkills() {
+  const t = T[lang];
+  document.getElementById('skills-bars').innerHTML = t.skills.map(s => `
+    <div class="skill-row">
+      <div class="skill-label-row">
+        <span class="skill-name">${s.name}</span>
+        <span class="skill-pct">${s.pct}%</span>
+      </div>
+      <div class="skill-bar"><div class="skill-fill" style="width:${s.pct}%"></div></div>
+    </div>
+  `).join('');
+  document.getElementById('tech-cloud').innerHTML = TECH_PILLS.map(tech =>
+    `<span class="tech-pill">${tech}</span>`
+  ).join('');
+  observeSkillBars();
+}
+
+function renderAbout() {
+  const t = T[lang];
+  const el = document.getElementById('about-text');
+  el.innerHTML = `<p>${t.aboutP1}</p><p>${t.aboutP2}</p><p>${t.aboutP3}</p>`;
+}
+
+function renderRepos() {
+  const t = T[lang];
+  document.getElementById('github-repos').innerHTML = t.repos.map(r => `
+    <a href="${r.url}" target="_blank" rel="noopener noreferrer" class="repo-card">
+      <div class="repo-name">${r.name}</div>
+      <div class="repo-desc">${r.desc}</div>
+      <div class="repo-meta">
+        <div class="repo-lang"><span class="repo-lang-dot"></span>${r.lang}</div>
+      </div>
+    </a>
+  `).join('');
+}
+
+// ── i18n apply ──────────────────────────────────────────────────────────────
+function applyLang() {
+  const t = T[lang];
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const k = el.dataset.i18n;
+    if (t[k] !== undefined) el.textContent = t[k];
+  });
+  const fn = document.getElementById('form-name');
+  const fe = document.getElementById('form-email');
+  const fm = document.getElementById('form-message');
+  if (fn) fn.placeholder = t.formPlName;
+  if (fe) fe.placeholder = t.formPlEmail;
+  if (fm) fm.placeholder = t.formPlMsg;
+
+  renderAbout();
+  renderProjects();
+  renderCerts();
+  renderSkills();
+  renderRepos();
+  observeReveal();
+
+  document.documentElement.lang = lang === 'jp' ? 'ja' : 'en';
+}
+
+function setLang(l) {
+  lang = l;
+  document.getElementById('btn-en').classList.toggle('active', l === 'en');
+  document.getElementById('btn-jp').classList.toggle('active', l === 'jp');
+  applyLang();
+}
+
+// ── Nav scroll ──────────────────────────────────────────────────────────────
+const navbar = document.getElementById('navbar');
+window.addEventListener('scroll', () => {
+  navbar.classList.toggle('scrolled', window.scrollY > 60);
+}, {passive:true});
+
+// ── Reveal ──────────────────────────────────────────────────────────────────
+function observeReveal() {
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) { e.target.classList.add('visible'); obs.unobserve(e.target); }
+    });
+  }, {threshold:0.1});
+  document.querySelectorAll('.reveal:not(.visible)').forEach(el => obs.observe(el));
+}
+
+// ── Skill bars ──────────────────────────────────────────────────────────────
+function observeSkillBars() {
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) { e.target.classList.add('animate'); obs.unobserve(e.target); }
+    });
+  }, {threshold:0.4});
+  document.querySelectorAll('.skill-fill:not(.animate)').forEach(el => obs.observe(el));
+}
+
+// ── Parallax ────────────────────────────────────────────────────────────────
+const orb1 = document.querySelector('.orb1');
+const orb2 = document.querySelector('.orb2');
+window.addEventListener('scroll', () => {
+  const y = window.scrollY;
+  if (orb1) orb1.style.transform = `translateY(${y * 0.22}px)`;
+  if (orb2) orb2.style.transform = `translateY(${y * -0.12}px)`;
+}, {passive:true});
+
+// ── GitHub heatmap ──────────────────────────────────────────────────────────
+const HEATMAP_CELL_W = 16; // 13px + 3px gap
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const cellColor = (level) => ['#1c1c1c','rgba(230,57,70,0.22)','rgba(230,57,70,0.42)','rgba(230,57,70,0.68)','#e63946'][level] || '#1c1c1c';
+
+function buildFallbackHeatmap() {
+  let s = 42;
+  const rand = () => { s = (Math.imul(1664525, s) + 1013904223) >>> 0; return s / 0xffffffff; };
+  const weeks = [];
+  for (let w = 0; w < 53; w++) {
+    const week = [];
+    for (let d = 0; d < 7; d++) {
+      let v = 0;
+      if (w < 5)       v = rand() < 0.07 ? Math.ceil(rand()*2) : 0;
+      else if (w < 22) v = rand() < 0.025 ? 1 : 0;
+      else if (w < 25) v = rand() < 0.04 ? 1 : 0;
+      else if (w < 33) v = rand() < 0.55 ? Math.ceil(rand()*4) : 0;
+      else if (w < 37) v = rand() < 0.25 ? Math.ceil(rand()*3) : 0;
+      else if (w < 41) v = rand() < 0.18 ? Math.ceil(rand()*2) : 0;
+      else if (w < 48) v = rand() < 0.45 ? Math.ceil(rand()*4) : 0;
+      else             v = rand() < 0.62 ? Math.ceil(rand()*4) : 0;
+      week.push(Math.min(v, 4));
+    }
+    weeks.push(week);
+  }
+  return {weeks, total: null, startDate: null};
+}
+
+function groupContributionsIntoWeeks(contributions) {
+  if (!contributions.length) return null;
+  const firstDate = new Date(contributions[0].date);
+  const dayOfWeek = firstDate.getDay();
+  const padded = Array(dayOfWeek).fill({level:0}).concat(contributions);
+  const weeks = [];
+  for (let i = 0; i < padded.length; i += 7) {
+    const chunk = padded.slice(i, i + 7);
+    while (chunk.length < 7) chunk.push({level:0});
+    weeks.push(chunk.map(d => d.level || 0));
+  }
+  return {weeks, startDate: firstDate};
+}
+
+function computeMonthLabels(weeks, startDate) {
+  const labels = [];
+  const base = startDate ? new Date(startDate) : new Date(Date.now() - 52*7*86400000);
+  // align base to its Sunday
+  base.setDate(base.getDate() - base.getDay());
+  let lastMonth = -1;
+  let lastX = -999;
+  weeks.forEach((_, wi) => {
+    const d = new Date(base);
+    d.setDate(d.getDate() + wi * 7);
+    const m = d.getMonth();
+    const x = wi * HEATMAP_CELL_W;
+    if (m !== lastMonth && (x - lastX) >= 28) {
+      labels.push({label: MONTH_NAMES[m], x});
+      lastMonth = m;
+      lastX = x;
+    }
+  });
+  return labels;
+}
+
+function renderHeatmap(weeks, startDate) {
+  const labels = computeMonthLabels(weeks, startDate);
+  const width = weeks.length * HEATMAP_CELL_W;
+  const monthRow = `<div class="heatmap-month-row" style="width:${width}px">
+    ${labels.map(m => `<span class="heatmap-month-tick" style="left:${m.x}px">${m.label}</span>`).join('')}
+  </div>`;
+  const grid = `<div class="heatmap-grid">
+    ${weeks.map(week => `
+      <div class="heatmap-week">
+        ${week.map(level => `<div class="heatmap-cell" style="background:${cellColor(level)}" title="${level} contribution${level!==1?'s':''}"></div>`).join('')}
+      </div>
+    `).join('')}
+  </div>`;
+  const legend = `<div class="heatmap-legend">
+    <span class="heatmap-legend-label">Less</span>
+    ${[0,1,2,3,4].map(l => `<div class="heatmap-legend-cell" style="background:${cellColor(l)}"></div>`).join('')}
+    <span class="heatmap-legend-label">More</span>
+  </div>`;
+  document.getElementById('heatmap-container').innerHTML =
+    `<div class="heatmap-outer">${monthRow}${grid}${legend}</div>`;
+}
+
+function loadHeatmap() {
+  fetch('https://github-contributions-api.jogruber.de/v4/rrblack?y=last')
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(data => {
+      const contribs = data.contributions || [];
+      const grouped = groupContributionsIntoWeeks(contribs);
+      if (!grouped) throw new Error('empty');
+      const totals = data.total || {};
+      const total = Object.values(totals).reduce((a,b) => a+b, 0);
+      if (total > 0) document.getElementById('contrib-total').textContent = total.toLocaleString();
+      renderHeatmap(grouped.weeks, grouped.startDate);
+    })
+    .catch(() => {
+      const fb = buildFallbackHeatmap();
+      document.getElementById('contrib-total').textContent = '303';
+      renderHeatmap(fb.weeks, null);
+    });
+}
+
+// ── Contact form ────────────────────────────────────────────────────────────
+document.getElementById('contact-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  const orig = btn.textContent;
+  btn.textContent = '…';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/contact', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        name: document.getElementById('form-name').value,
+        email: document.getElementById('form-email').value,
+        message: document.getElementById('form-message').value,
+      }),
+    });
+    if (!res.ok) throw new Error('send failed');
+    document.getElementById('contact-form').style.display = 'none';
+    document.getElementById('form-success').classList.add('show');
+  } catch {
+    btn.textContent = 'Failed — try again';
+    btn.disabled = false;
+    setTimeout(() => { btn.textContent = orig; }, 3000);
+  }
+});
+
+// ── Init ────────────────────────────────────────────────────────────────────
+applyLang();
+loadHeatmap();
+</script>
+</body>
+</html>
