@@ -1,6 +1,10 @@
 export async function onRequestPost(context) {
   const { request, env } = context;
 
+  if (!env.RESEND_API_KEY) {
+    return json({ error: 'RESEND_API_KEY not configured on this deployment' }, 500);
+  }
+
   let body;
   try {
     body = await request.json();
@@ -29,7 +33,8 @@ export async function onRequestPost(context) {
   });
 
   if (!response.ok) {
-    return json({ error: 'Email failed to send' }, 500);
+    const detail = await response.text();
+    return json({ error: 'Resend rejected the request', status: response.status, detail }, 500);
   }
 
   return json({ ok: true }, 200);
