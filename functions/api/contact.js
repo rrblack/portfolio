@@ -2,7 +2,7 @@ export async function onRequestPost(context) {
   const { request, env } = context;
 
   if (!env.RESEND_API_KEY) {
-    return json({ error: 'RESEND_API_KEY not configured on this deployment' }, 500);
+    return json({ error: 'Email service not configured' }, 500);
   }
 
   let body;
@@ -24,7 +24,7 @@ export async function onRequestPost(context) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: 'Portfolio Contact <onboarding@resend.dev>',
+      from: 'Portfolio Contact <contact@kyleporter.dev>',
       to: ['rrblack701@gmail.com'],
       subject: `Portfolio contact from ${name}`,
       text: `Name: ${name}\nEmail: ${email}\n\n${message}`,
@@ -33,8 +33,8 @@ export async function onRequestPost(context) {
   });
 
   if (!response.ok) {
-    const detail = await response.text();
-    return json({ error: 'Resend rejected the request', status: response.status, detail }, 500);
+    console.error('Resend rejected', response.status, await response.text());
+    return json({ error: 'Email failed to send' }, 500);
   }
 
   return json({ ok: true }, 200);
