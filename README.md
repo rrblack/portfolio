@@ -13,7 +13,7 @@ Black/red aesthetic, signature-style hero nameplate with red glow, fully bilingu
 - **Hero dashboard** — current stack, AWS + JLPT N1 credentials, live projects at a glance
 - **Live GitHub heatmap** — pulls real contribution data from `github-contributions-api.jogruber.de`, with a seeded fallback if the API is blocked
 - **Project detail modals** — click any project card for a full overview: role, year, deploy target, stack, backstory, highlights
-- **Contact form** — real POST → Vercel serverless → Resend email delivery
+- **Contact form** — real POST → Cloudflare Pages Function → Resend, sent from a verified `kyleporter.dev` sender
 - **Availability card** — green-dot status, Tokyo location, response window, language list
 - **Reveal-on-scroll animations** and parallax red orbs in the hero
 - **Responsive** down to 900px (mobile drops the hero dashboard)
@@ -25,49 +25,49 @@ Black/red aesthetic, signature-style hero nameplate with red glow, fully bilingu
 | Markup / Styling | Plain HTML + CSS (single file, no build step) |
 | Scripting | Vanilla JS (no framework runtime) |
 | Fonts | Space Grotesk, Space Mono, Noto Sans JP, Kaushan Script |
-| Serverless | Vercel Functions (`/api/contact`) |
-| Email | Resend |
-| Hosting | Vercel |
+| Serverless | Cloudflare Pages Functions (`/api/contact`) |
+| Email | Resend (verified `kyleporter.dev` sender, SPF + DKIM) |
+| Hosting | Cloudflare Pages |
 
 ## 🚀 Local development
 
 No build step required.
 
 ```bash
-# open in browser directly
-open index.html     # macOS
+# open the static page directly
 start index.html    # Windows
+open index.html     # macOS
 ```
 
-For the contact form to work locally, use the Vercel CLI:
+For the contact form to work locally, use Wrangler so the Pages Function is served alongside the static files:
 
 ```bash
-vercel dev
+npx wrangler pages dev .
 ```
 
-Requires a `.env` file with:
+Wrangler reads local secrets from `.dev.vars`:
 
 ```
 RESEND_API_KEY=your_key_here
 ```
 
-`.env` is gitignored — never commit secrets.
+`.dev.vars` and `.env` are gitignored — never commit secrets. The production `RESEND_API_KEY` lives in the Cloudflare Pages dashboard under **Settings → Environment variables**.
 
 ## 📁 Structure
 
 ```
 portfolio/
-├── index.html            Main page — all CSS/JS inline
-├── api/
-│   └── contact.js        Vercel serverless POST /api/contact (Resend)
-├── photos/               Profile + project screenshots
+├── index.html                Main page — all CSS/JS inline
+├── functions/
+│   └── api/
+│       └── contact.js        Cloudflare Pages Function: POST /api/contact (Resend)
+├── photos/                   Profile + project screenshots
 │   ├── biopicture.jpeg
 │   ├── moapro.png
 │   ├── blogen.png
 │   └── blogjp.png
-├── modelsite.png         Model portfolio project screenshot
-├── vercel.json           Vercel routing config
-├── .gitignore            Excludes .env, node_modules, .vercel
+├── modelsite.png             Model portfolio project screenshot
+├── .gitignore                Excludes .env, .dev.vars, node_modules
 └── README.md
 ```
 
