@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -328,6 +328,8 @@ function buildEnv(h, vars) {
   if (vars.model) for (const [k, v] of Object.entries(h.modelEnv || {})) env[k] = fill(v, vars);
   for (const [k, v] of Object.entries(env)) if (v === '') delete env[k];
   if (env.NO_COLOR == null) env.NO_COLOR = '1';
+  // Commands the agent runs inherit this, so Python tools print as they go instead of when they exit.
+  if (env.PYTHONUNBUFFERED == null) env.PYTHONUNBUFFERED = '1';
   env.FORCE_COLOR = '0';
   return env;
 }

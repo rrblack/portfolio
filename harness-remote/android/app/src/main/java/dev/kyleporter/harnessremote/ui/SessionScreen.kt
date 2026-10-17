@@ -595,7 +595,7 @@ private fun ToolBlock(item: Item.Tool, progress: String?) {
                     (if (live.size > LIVE_LINES) listOf("… ${live.size - LIVE_LINES} earlier lines") else emptyList<String>())
                         .plus(live.takeLast(LIVE_LINES)).joinToString("\n")
                 }
-                running -> "Running…"
+                running -> "Running… no output yet"
                 lines.isEmpty() || lines.all { it.isBlank() } -> if (item.isError) "Failed" else "(no output)"
                 expanded || !long -> lines.joinToString("\n")
                 else -> lines.take(TOOL_PREVIEW_LINES).joinToString("\n") + "\n… +${lines.size - TOOL_PREVIEW_LINES} lines (tap to expand)"
