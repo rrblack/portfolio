@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -504,8 +504,9 @@ function analyzeCommand(command, cwd, home, platform, env) {
     HOME: home, USERPROFILE: home, HOMEPATH: home, PWD: cwd,
     APPDATA: env.APPDATA, LOCALAPPDATA: env.LOCALAPPDATA, TEMP: env.TEMP || env.TMP, TMP: env.TMP || env.TEMP,
   };
+  const assigned = {};
   const lookup = (name) => {
-    for (const src of [known, env]) {
+    for (const src of [assigned, known, env]) {
       const key = Object.keys(src).find((k) => (win ? k.toLowerCase() === name.toLowerCase() : k === name));
       if (key && src[key]) return src[key];
     }
@@ -530,7 +531,7 @@ function analyzeCommand(command, cwd, home, platform, env) {
       return v;
     });
     if (win) t = t.replace(/^\/([a-zA-Z])(\/|$)/, (m, drive) => drive.toUpperCase() + ':\\');
-    return { path: t, unresolved };
+    return { path: t.replace(/\u0001/g, ''), unresolved };
   };
 
   const judge = (target) => {
@@ -554,10 +555,41 @@ function analyzeCommand(command, cwd, home, platform, env) {
   };
 
   const DELETE = new Set(['rm', 'rmdir', 'rd', 'del', 'erase', 'ri', 'remove-item', 'unlink', 'shred', 'rimraf', 'trash', 'rmtree']);
-  const segments = command.split(/\s*(?:&&|\|\||;|\||\r?\n)\s*/).filter(Boolean);
+  // PowerShell built-ins that cannot be reassigned: "$home = ..." fails, the script carries on, and $home
+  // still means the user folder. That exact bug deleted a user's home folder.
+  const readOnlyPs = ['home', 'pid', 'pshome', 'host', 'true', 'false', 'null', 'shellid', 'executioncontext', 'psversiontable', 'iswindows', 'islinux', 'ismacos', 'iscoreclr'];
+  // ${NAME} becomes $NAME plus a \u0001 terminator so splitting on PowerShell braces leaves it intact.
+  const segments = command.replace(/\$\{([A-Za-z_]\w*)\}/g, (m, n) => '$' + n + '\u0001')
+    .split(/\s*(?:&&|\|\||;|\||\r?\n|\{|\})\s*/).filter(Boolean);
   let here = cwd;
   segments.forEach((seg, i) => {
+    const ps = seg.match(/^\$([A-Za-z_][\w]*)\s*=(?!=)\s*(.*)$/);
+    const sh = seg.match(/^([A-Za-z_]\w*)=(.*)$/);
+    if (ps || sh) {
+      const name = (ps || sh)[1];
+      const value = (ps || sh)[2].trim().replace(/^(['"])(.*)\1$/, '$2');
+      if (ps && readOnlyPs.includes(name.toLowerCase())) {
+        result.block = result.block || `it assigns $${name}, a built-in PowerShell variable that cannot be changed (the assignment fails and $${name} keeps its original value${name.toLowerCase() === 'home' ? ', your user folder' : ''}). Use a different variable name`;
+        return;
+      }
+      const { path: v, unresolved } = expand(value);
+      if (unresolved) delete assigned[name];
+      else assigned[name] = v;
+      return;
+    }
     let tokens = tokenize(seg);
+    while (tokens.length && /^(if|elseif|else|while|foreach|for|try|finally|then|do)$/i.test(tokens[0])) {
+      tokens = tokens.slice(1);
+      while (tokens.length && /^\(/.test(tokens[0])) {
+        let depth = 0;
+        let k = 0;
+        for (; k < tokens.length; k++) {
+          depth += (tokens[k].match(/\(/g) || []).length - (tokens[k].match(/\)/g) || []).length;
+          if (depth <= 0) break;
+        }
+        tokens = tokens.slice(k + 1);
+      }
+    }
     while (tokens.length && /^(sudo|command|exec|nohup|time|xargs|&|\.)$/i.test(tokens[0])) tokens = tokens.slice(1);
     if (!tokens.length) return;
     const head = tokens[0].toLowerCase().replace(/\.(exe|cmd|bat)$/, '').replace(/^.*[\\/]/, '');
@@ -605,7 +637,7 @@ function analyzeCommand(command, cwd, home, platform, env) {
     }
     for (const raw of args) {
       const { path: expanded, unresolved } = expand(raw);
-      if (unresolved) { result.block = result.block || `it deletes "${raw}", which uses a variable that is not set (an empty variable can turn this into a delete of a much bigger folder)`; continue; }
+      if (unresolved) { result.block = result.block || `it deletes "${raw.replace(/\u0001/g, '')}", which uses a variable that is not set (an empty variable can turn this into a delete of a much bigger folder)`; continue; }
       if (!expanded.trim()) { result.block = result.block || 'its target path is empty'; continue; }
       const wild = /[*?]/.test(expanded);
       let target = expanded;
