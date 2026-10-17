@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 1024 * 1024;
@@ -516,8 +516,12 @@ function toolSummary(args) {
   return text.length > 300 ? `${text.slice(0, 300)}…` : text;
 }
 
+function contentText(result) {
+  return ((result && result.content) || []).filter((c) => c && c.type === 'text').map((c) => c.text).join('\n');
+}
+
 function toolResultText(result) {
-  const text = ((result && result.content) || []).filter((c) => c && c.type === 'text').map((c) => c.text).join('\n');
+  const text = contentText(result);
   return text.length > 4000 ? `${text.slice(0, 4000)}\n… (${text.length - 4000} more characters)` : text;
 }
 
@@ -525,6 +529,13 @@ function toolResultText(result) {
 function piRecordHandler(s, p) {
   p.stream = { kind: null, text: '' };
   p.asks = new Map();
+  p.progress = new Map();
+  // Live tool output (cumulative, stdout and stderr) goes to viewers only; the final result is stored.
+  const sendProgress = () => {
+    p.progressTimer = null;
+    for (const [toolId, text] of p.progress) broadcastProgress(s, toolId, text);
+    p.progress.clear();
+  };
   const streamFlush = () => {
     clearTimeout(p.streamTimer);
     p.streamTimer = null;
@@ -569,8 +580,16 @@ function piRecordHandler(s, p) {
         streamFlush();
         pushEvent(s, { kind: 'tool', toolId: o.toolCallId, tool: o.toolName, text: toolSummary(o.args) });
         return;
+      case 'tool_execution_update': {
+        if (o.parentToolCallId) return;
+        const text = contentText(o.partialResult);
+        p.progress.set(o.toolCallId, text.length > 3000 ? text.slice(-3000) : text);
+        if (!p.progressTimer) p.progressTimer = setTimeout(sendProgress, 250);
+        return;
+      }
       case 'tool_execution_end':
         if (o.parentToolCallId) return;
+        p.progress.delete(o.toolCallId);
         streamFlush();
         pushEvent(s, { kind: 'toolres', toolId: o.toolCallId, tool: o.toolName, isError: !!o.isError, durationMs: o.durationMs || 0, text: toolResultText(o.result) });
         return;
@@ -991,6 +1010,10 @@ const clients = new Set();
 
 function broadcastEvent(s, ev) {
   for (const c of clients) if (c.subs.has(s.id)) c.send({ t: 'event', id: s.id, ev });
+}
+
+function broadcastProgress(s, toolId, text) {
+  for (const c of clients) if (c.subs.has(s.id)) c.send({ t: 'progress', id: s.id, toolId, text });
 }
 
 let sessionsTimer = null;

@@ -104,7 +104,7 @@ Presets whose command isn't installed show up greyed out in the app, with the re
 
 - **Pi** runs in RPC mode, so the app shows everything as it happens, the way Claude Code does:
   - streamed thinking (tap to expand)
-  - each tool call (`⏺ Bash(npm test)`), with a short result preview (`⎿ …`, tap to expand)
+  - each tool call (`⏺ Bash(npm test)`), with its output streaming live underneath while it runs (stdout and stderr, last 8 lines), then a short result preview (`⎿ …`, tap to expand). This includes trace output from commands that print their progress to stderr, such as a Claude delegation script run with `-T`
   - the reply as it's written
   - a live "✻ Running Bash… (12s)" line
 

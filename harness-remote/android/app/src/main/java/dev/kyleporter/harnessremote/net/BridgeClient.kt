@@ -36,6 +36,7 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<JSONObject>>()
     private val rid = AtomicInteger()
     private val eventFlows = HashMap<String, MutableStateFlow<List<BridgeEvent>>>()
+    private val progressFlows = HashMap<String, MutableStateFlow<Map<String, String>>>()
     private val subscribed = LinkedHashSet<String>()
     private val synced = HashSet<String>()
     private var socket: WebSocket? = null
@@ -150,9 +151,14 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
                 setSessions(parseSessions(o.optJSONArray("sessions")))
             }
             "sessions" -> setSessions(parseSessions(o.optJSONArray("sessions")))
+            "progress" -> {
+                val flow = progressFlows.getOrPut(o.str("id")) { MutableStateFlow(emptyMap()) }
+                flow.value = flow.value + (o.str("toolId") to o.str("text"))
+            }
             "event" -> {
                 val id = o.str("id")
                 val ev = parseEvent(o.getJSONObject("ev"))
+                if (ev.kind == "toolres") progressFlows[id]?.let { it.value = it.value - ev.toolId }
                 val flow = eventFlows[id] ?: return
                 val cur = flow.value
                 if (cur.isEmpty() || ev.seq > cur.last().seq) flow.value = cur + ev
@@ -187,6 +193,8 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
     }
 
     fun events(id: String): StateFlow<List<BridgeEvent>> = eventFlows.getOrPut(id) { MutableStateFlow(emptyList()) }
+
+    fun progress(id: String): StateFlow<Map<String, String>> = progressFlows.getOrPut(id) { MutableStateFlow(emptyMap()) }
 
     suspend fun subscribe(id: String) {
         subscribed.add(id)

@@ -84,6 +84,7 @@ private sealed interface Item {
     data class Thinking(override val key: String, val text: String) : Item
     data class Tool(
         override val key: String,
+        val toolId: String,
         val name: String,
         val summary: String,
         val result: String?,
@@ -153,14 +154,14 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
             "tool" -> {
                 flush()
                 tools[e.toolId] = out.size
-                out += Item.Tool("t${e.seq}", e.tool, e.text, null, false, 0)
+                out += Item.Tool("t${e.seq}", e.toolId, e.tool, e.text, null, false, 0)
             }
             "toolres" -> {
                 flush()
                 val i = tools[e.toolId]
                 val t = i?.let { out[it] as? Item.Tool }
                 if (i != null && t != null) out[i] = t.copy(result = e.text, isError = e.isError, durationMs = e.durationMs)
-                else out += Item.Tool("t${e.seq}", e.tool, "", e.text, e.isError, e.durationMs)
+                else out += Item.Tool("t${e.seq}", e.toolId, e.tool, "", e.text, e.isError, e.durationMs)
             }
             "ask" -> {
                 flush()
@@ -197,6 +198,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     val hello by client.hello.collectAsState()
     val conn by client.conn.collectAsState()
     val events by client.events(id).collectAsState()
+    val progress by client.progress(id).collectAsState()
     val session = sessions.find { it.id == id }
     val harness = hello?.harnesses?.find { it.id == session?.harness }
     val interactive = harness?.mode == "interactive"
@@ -219,7 +221,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
             last >= listState.layoutInfo.totalItemsCount - 3
         }
     }
-    LaunchedEffect(events.size, showWorking) {
+    LaunchedEffect(events.size, showWorking, progress) {
         val count = listState.layoutInfo.totalItemsCount
         if (count > 0 && (atBottom || listState.firstVisibleItemIndex == 0)) listState.scrollToItem(count - 1, Int.MAX_VALUE / 2)
     }
@@ -282,7 +284,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(items, key = { it.key }) { item ->
-                    ItemView(item, answerable = session?.state == "waiting") { askId, value, confirmed, cancelled ->
+                    ItemView(item, answerable = session?.state == "waiting", progress = (item as? Item.Tool)?.let { progress[it.toolId] }) { askId, value, confirmed, cancelled ->
                         act { client.answer(id, askId, value, confirmed, cancelled) }
                     }
                 }
@@ -391,7 +393,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
 private typealias Answer = (askId: String, value: String?, confirmed: Boolean?, cancelled: Boolean) -> Unit
 
 @Composable
-private fun ItemView(item: Item, answerable: Boolean, onAnswer: Answer) {
+private fun ItemView(item: Item, answerable: Boolean, progress: String?, onAnswer: Answer) {
     when (item) {
         is Item.User -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
             SelectionContainer {
@@ -409,7 +411,7 @@ private fun ItemView(item: Item, answerable: Boolean, onAnswer: Answer) {
             SelectionContainer { Text(item.text, color = OffWhite, fontSize = 15.sp, lineHeight = 21.sp) }
         }
         is Item.Thinking -> ThinkingBlock(item)
-        is Item.Tool -> ToolBlock(item)
+        is Item.Tool -> ToolBlock(item, progress)
         is Item.Ask -> AskCard(item, answerable, onAnswer)
         is Item.Output -> if (item.err) WarningBlock(item) else SelectionContainer {
             Text(
@@ -446,9 +448,10 @@ private fun ThinkingBlock(item: Item.Thinking) {
 }
 
 private const val TOOL_PREVIEW_LINES = 3
+private const val LIVE_LINES = 8
 
 @Composable
-private fun ToolBlock(item: Item.Tool) {
+private fun ToolBlock(item: Item.Tool, progress: String?) {
     var expanded by rememberSaveable(item.key) { mutableStateOf(false) }
     val running = item.result == null
     val dot = when {
@@ -473,6 +476,11 @@ private fun ToolBlock(item: Item.Tool) {
         Row(Modifier.padding(start = 18.dp)) {
             Text("⎿  ", color = Gray, fontFamily = Mono, fontSize = 12.sp)
             val body = when {
+                running && !progress.isNullOrBlank() -> {
+                    val live = cleanTerminal(progress).trimEnd().lines()
+                    (if (live.size > LIVE_LINES) listOf("… ${live.size - LIVE_LINES} earlier lines") else emptyList<String>())
+                        .plus(live.takeLast(LIVE_LINES)).joinToString("\n")
+                }
                 running -> "Running…"
                 lines.isEmpty() || lines.all { it.isBlank() } -> if (item.isError) "Failed" else "(no output)"
                 expanded || !long -> lines.joinToString("\n")
