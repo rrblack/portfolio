@@ -23,6 +23,15 @@ class ConnectionService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        // Restarted by Android after it closed the app: connect again so sessions keep notifying.
+        if (hub.client.value == null) {
+            val server = hub.lastServer()
+            if (server == null) {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            hub.connect(server, navigate = false)
+        }
         ensureChannels(this)
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
@@ -45,7 +54,7 @@ class ConnectionService : Service() {
         val type = if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
         runCatching { ServiceCompat.startForeground(this, NOTIFICATION_ID, n, type) }
             .onFailure { stopSelf() }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {

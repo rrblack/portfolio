@@ -5,11 +5,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.MediaType.Companion.toMediaType
@@ -21,6 +24,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -45,10 +49,17 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
     private var wanted = false
     private var attempt = 0
     private var retryJob: Job? = null
+    private var checking: Job? = null
+    private val flushLock = Mutex()
+    private val awaiting = HashSet<String>()
+    private val outboxFailures = HashMap<String, String>()
 
     val conn = MutableStateFlow<ConnState>(ConnState.Closed)
     val hello = MutableStateFlow<Hello?>(null)
     val sessions = MutableStateFlow<List<SessionSummary>>(emptyList())
+    val outbox = MutableStateFlow<List<Outgoing>>(emptyList())
+    /** Set when a message from the outbox was refused by the bridge after a reconnect: session id to reason. */
+    val outboxError = MutableStateFlow<Pair<String, String>?>(null)
 
     var onSessions: ((old: List<SessionSummary>, new: List<SessionSummary>) -> Unit)? = null
 
@@ -77,6 +88,35 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
         open()
     }
 
+    /**
+     * Called when the app comes back to the foreground or the phone's network changes (Wi-Fi, mobile data,
+     * Tailscale switching on or off). A socket can look connected after the network under it went away,
+     * so a connected client pings the bridge and starts over if the ping goes unanswered.
+     */
+    fun wake() {
+        if (!wanted) return
+        when (conn.value) {
+            ConnState.Connected -> {
+                if (checking?.isActive == true) return
+                checking = scope.launch {
+                    val alive = runCatching { request("ping", timeoutMs = 4_000) }.isSuccess
+                    if (!alive && conn.value == ConnState.Connected) reopen("The bridge stopped answering")
+                }
+            }
+            is ConnState.Retrying -> { retryJob?.cancel(); open() }
+            else -> {}
+        }
+    }
+
+    private fun reopen(reason: String) {
+        socket?.cancel()
+        socket = null
+        failPending(reason)
+        attempt = 0
+        retryJob?.cancel()
+        open()
+    }
+
     private fun open() {
         conn.value = ConnState.Connecting
         val req = Request.Builder()
@@ -93,6 +133,7 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
                 attempt = 0
                 conn.value = ConnState.Connected
                 for (id in subscribed.toList()) launch { runCatching { subscribe(id) } }
+                launch { flushOutbox() }
             }
         }
 
@@ -141,7 +182,7 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
     private fun failPending(reason: String) {
         val all = pending.values.toList()
         pending.clear()
-        all.forEach { it.completeExceptionally(BridgeException(reason)) }
+        all.forEach { it.completeExceptionally(ConnectionLost(reason)) }
     }
 
     private fun handle(o: JSONObject) {
@@ -176,7 +217,7 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
         onSessions?.invoke(old, list)
     }
 
-    suspend fun request(type: String, build: JSONObject.() -> Unit = {}): JSONObject {
+    suspend fun request(type: String, timeoutMs: Long = 20_000, build: JSONObject.() -> Unit = {}): JSONObject {
         val id = rid.incrementAndGet()
         val msg = JSONObject().put("t", type).put("rid", id).apply(build)
         val d = CompletableDeferred<JSONObject>()
@@ -184,10 +225,12 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
         val ws = socket
         if (ws == null || conn.value != ConnState.Connected || !ws.send(msg.toString())) {
             pending.remove(id)
-            throw BridgeException("Not connected to the bridge")
+            throw ConnectionLost("Not connected to the bridge")
         }
         val r = try {
-            withTimeout(20_000) { d.await() }
+            withTimeout(timeoutMs) { d.await() }
+        } catch (e: TimeoutCancellationException) {
+            throw ConnectionLost("The bridge did not answer")
         } finally {
             pending.remove(id)
         }
@@ -230,14 +273,42 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
         return s
     }
 
+    /**
+     * Sends a message, or keeps it in the outbox when the bridge can't be reached right now. Throws only when
+     * the bridge refused the message. Each message carries an id so a retry after a dropped reply is not run twice.
+     */
     suspend fun send(id: String, text: String, photos: List<Photo> = emptyList(), interrupt: Boolean = false) {
-        request("send") {
-            put("id", id); put("text", text)
-            if (interrupt) put("interrupt", true)
-            if (photos.isNotEmpty()) {
-                put("images", JSONArray(photos.map { JSONObject().put("data", it.data).put("mimeType", it.mimeType) }))
-                put("thumbs", JSONArray(photos.map { it.thumb }))
+        val msg = Outgoing(UUID.randomUUID().toString(), id, text, photos, interrupt)
+        outbox.value = outbox.value + msg
+        awaiting += msg.cid
+        try { flushOutbox() } finally { awaiting -= msg.cid }
+        outboxFailures.remove(msg.cid)?.let { throw BridgeException(it) }
+    }
+
+    fun cancelOutgoing(cid: String) {
+        outbox.value = outbox.value.filterNot { it.cid == cid }
+    }
+
+    private suspend fun flushOutbox() = flushLock.withLock {
+        while (true) {
+            val next = outbox.value.firstOrNull() ?: return@withLock
+            if (conn.value != ConnState.Connected) return@withLock
+            try {
+                request("send") {
+                    put("id", next.sessionId); put("text", next.text); put("cid", next.cid)
+                    if (next.interrupt) put("interrupt", true)
+                    if (next.photos.isNotEmpty()) {
+                        put("images", JSONArray(next.photos.map { JSONObject().put("data", it.data).put("mimeType", it.mimeType) }))
+                        put("thumbs", JSONArray(next.photos.map { it.thumb }))
+                    }
+                }
+            } catch (e: ConnectionLost) {
+                return@withLock
+            } catch (e: BridgeException) {
+                if (next.cid in awaiting) outboxFailures[next.cid] = e.message ?: "The bridge refused the message"
+                else outboxError.value = next.sessionId to "Not sent: \"${next.text.take(40)}\": ${e.message}"
             }
+            outbox.value = outbox.value.filterNot { it.cid == next.cid }
         }
     }
 

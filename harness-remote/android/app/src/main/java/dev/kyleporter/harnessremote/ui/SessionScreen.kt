@@ -118,6 +118,7 @@ import dev.kyleporter.harnessremote.Route
 import dev.kyleporter.harnessremote.net.BridgeClient
 import dev.kyleporter.harnessremote.net.BridgeEvent
 import dev.kyleporter.harnessremote.net.ConnState
+import dev.kyleporter.harnessremote.net.Outgoing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -300,6 +301,9 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     val events by client.events(id).collectAsState()
     val progress by client.progress(id).collectAsState()
     val liveActivity by client.activity(id).collectAsState()
+    val outbox by client.outbox.collectAsState()
+    val unsent = outbox.filter { it.sessionId == id }
+    val outboxError by client.outboxError.collectAsState()
     val sent = remember { mutableStateMapOf<String, String>() }
     val session = sessions.find { it.id == id }
     val harness = hello?.harnesses?.find { it.id == session?.harness }
@@ -309,7 +313,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     val showWorking = session != null && (session.state == "waiting" || (!interactive && session.state == "running"))
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    var input by remember { mutableStateOf("") }
+    var input by remember(id) { mutableStateOf(hub.draft(id)) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
@@ -324,7 +328,16 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     }
 
     LaunchedEffect(id, conn) {
-        if (conn == ConnState.Connected) runCatching { client.subscribe(id) }.onFailure { error = it.message }
+        if (conn == ConnState.Connected) runCatching { client.subscribe(id) }.onFailure {
+            if (it.message == "No such session") hub.route.value = Route.Sessions else error = it.message
+        }
+    }
+    LaunchedEffect(id, input) {
+        delay(300)
+        hub.saveDraft(id, input)
+    }
+    LaunchedEffect(outboxError) {
+        outboxError?.takeIf { it.first == id }?.let { error = it.second; client.outboxError.value = null }
     }
 
     // Follow mode keeps the newest output in view. Only the user dragging back through history turns it
@@ -343,7 +356,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     }
     val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
     LaunchedEffect(imeBottom) { if (imeBottom > 0) follow = true }
-    val lastIndex = items.size - 1 + if (showWorking) 1 else 0
+    val lastIndex = items.size - 1 + unsent.size + if (showWorking) 1 else 0
     val growth = events.size + (items.lastOrNull()?.let { (it as? Item.Assistant)?.text?.length ?: (it as? Item.Thinking)?.text?.length ?: 0 } ?: 0) +
         progress.values.sumOf { it.length }
     LaunchedEffect(lastIndex, growth, follow, imeBottom) {
@@ -380,7 +393,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                     Column {
                         Text(session?.title ?: "Session", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 17.sp)
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (conn != ConnState.Connected) ConnLine(conn)
+                            if (conn != ConnState.Connected) Box(Modifier.clickable { client.wake() }) { ConnLine(conn) }
                             else {
                                 StateChip(session?.state ?: "idle")
                                 Spacer(Modifier.width(8.dp))
@@ -426,6 +439,12 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                         thinkingLive = busy && item === items.lastOrNull(),
                         sentAnswer = (item as? Item.Ask)?.let { sent[it.askId] },
                     )
+                }
+                items(unsent, key = { "o" + it.cid }) { msg ->
+                    UnsentBubble(msg, connected = conn == ConnState.Connected) {
+                        client.cancelOutgoing(msg.cid)
+                        if (input.isBlank()) input = msg.text
+                    }
                 }
                 if (showWorking && session != null) {
                     item(key = "working") {
@@ -526,6 +545,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                     placeholder = {
                         Text(
                             when {
+                                conn != ConnState.Connected -> "Offline · sends when the connection is back"
                                 structured && session?.busy == true -> "Message: read after this step · ⚡ sends now"
                                 session?.state == "waiting" -> "Answer the prompt…"
                                 session?.busy == true && !interactive -> "Queue a message for after this turn"
@@ -539,8 +559,8 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                     maxLines = 6,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Red, unfocusedBorderColor = SurfaceHigh),
                 )
-                val canSend = (input.isNotBlank() || photos.isNotEmpty()) && conn == ConnState.Connected
-                if (busy && !interactive && canSend) {
+                val canSend = (input.isNotBlank() || photos.isNotEmpty()) && conn !is ConnState.Failed
+                if (busy && !interactive && canSend && conn == ConnState.Connected) {
                     IconButton(
                         onClick = {
                             val text = input
@@ -606,6 +626,23 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                 }) { Text("Delete", color = Red) }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
+private fun UnsentBubble(msg: Outgoing, connected: Boolean, onCancel: () -> Unit) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        Text(
+            msg.text.ifBlank { "${msg.photos.size} photo(s)" },
+            Modifier.widthIn(max = 320.dp).background(Red.copy(alpha = 0.08f), RoundedCornerShape(14.dp, 14.dp, 4.dp, 14.dp))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            color = OffWhite.copy(alpha = 0.6f), fontSize = 15.sp,
+        )
+        Text(
+            if (connected) "sending…" else "not sent yet · goes out when the connection is back · tap to cancel",
+            color = Amber, fontSize = 10.sp,
+            modifier = Modifier.clickable(enabled = !connected, onClick = onCancel),
         )
     }
 }

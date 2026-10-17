@@ -3,7 +3,13 @@ package dev.kyleporter.harnessremote.net
 import org.json.JSONArray
 import org.json.JSONObject
 
-class BridgeException(message: String) : Exception(message)
+open class BridgeException(message: String) : Exception(message)
+
+/** The request may not have reached the bridge: no connection, the connection dropped, or no reply in time. */
+class ConnectionLost(message: String) : BridgeException(message)
+
+/** A message typed while the phone couldn't reach the bridge. It goes out, in order, once the connection is back. */
+data class Outgoing(val cid: String, val sessionId: String, val text: String, val photos: List<Photo>, val interrupt: Boolean)
 
 data class Server(
     val id: String,

@@ -24,7 +24,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val hub = hub
-        if (savedInstanceState == null && hub.client.value == null) hub.lastServer()?.let { hub.connect(it) }
+        if (savedInstanceState == null && hub.route.value == Route.Servers) hub.resume()
         handleIntent(intent)
         if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
 

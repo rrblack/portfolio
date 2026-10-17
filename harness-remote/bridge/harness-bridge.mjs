@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.8.0';
+const VERSION = '0.9.0';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -85,6 +85,7 @@ config.lmstudio = localUrl(config.lmstudio, 1234);
 
 const port = Number(flag('--port') || config.port);
 const host = String(flag('--host') || config.host);
+const transcriptsDir = config.transcripts === false ? null : path.resolve(config.transcripts || path.join(path.dirname(configPath), 'transcripts'));
 
 function localUrl(value, defaultPort) {
   try {
@@ -1133,6 +1134,7 @@ function pushEvent(s, ev) {
   s.updatedAt = ev.ts;
   broadcastEvent(s, ev);
   scheduleSave();
+  markTranscript(s);
 }
 
 function setState(s, state) {
@@ -1480,9 +1482,132 @@ function stopSession(s, signal = 'SIGINT') {
 function deleteSession(s) {
   stopSession(s, 'SIGTERM');
   try { fs.unlinkSync(controlPath(s)); } catch {}
+  removeTranscript(s);
   sessions.delete(s.id);
   broadcastSessions();
   scheduleSave();
+}
+
+// ---------------------------------------------------------------- transcripts
+
+// A readable copy of every chat, kept next to the config so it can be opened on the computer.
+const transcriptDirty = new Set();
+let transcriptTimer = null;
+
+function markTranscript(s) {
+  if (!transcriptsDir) return;
+  transcriptDirty.add(s.id);
+  if (!transcriptTimer) transcriptTimer = setTimeout(flushTranscripts, 2000);
+}
+
+function transcriptName(s) {
+  const slug = s.title.replace(/[<>:"/\\|?*\x00-\x1f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).replace(/[. ]+$/, '') || 'session';
+  return `${slug} (${s.id}).md`;
+}
+
+function removeTranscript(s) {
+  transcriptDirty.delete(s.id);
+  if (!transcriptsDir) return;
+  for (const name of [s.transcriptFile, transcriptName(s)]) if (name) try { fs.unlinkSync(path.join(transcriptsDir, name)); } catch {}
+}
+
+function flushTranscripts() {
+  transcriptTimer = null;
+  const ids = [...transcriptDirty];
+  transcriptDirty.clear();
+  try { fs.mkdirSync(transcriptsDir, { recursive: true, mode: 0o700 }); } catch (e) { console.error(`Transcripts: ${e.message}`); return; }
+  for (const id of ids) {
+    const s = sessions.get(id);
+    if (!s) continue;
+    const name = transcriptName(s);
+    try {
+      const file = path.join(transcriptsDir, name);
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, transcriptMarkdown(s), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+      if (s.transcriptFile && s.transcriptFile !== name) try { fs.unlinkSync(path.join(transcriptsDir, s.transcriptFile)); } catch {}
+      s.transcriptFile = name;
+    } catch (e) {
+      console.error(`Transcript for "${s.title}": ${e.message}`);
+    }
+  }
+}
+
+function fenced(text, lang = '') {
+  const longest = Math.max(2, ...(String(text).match(/`+/g) || []).map((m) => m.length));
+  const fence = '`'.repeat(longest + 1);
+  return `${fence}${lang}\n${text}\n${fence}`;
+}
+
+function clip(text, maxLines) {
+  const lines = String(text).replace(/\n+$/, '').split('\n');
+  return lines.length > maxLines ? `${lines.slice(0, maxLines).join('\n')}\n… (${lines.length - maxLines} more lines)` : lines.join('\n');
+}
+
+function transcriptMarkdown(s) {
+  const h = harnessList().find((x) => x.id === s.harness);
+  const when = (ts) => new Date(ts).toLocaleString();
+  const out = [
+    `# ${s.title}`, '',
+    `- **Harness:** ${h?.name || s.harness}${s.model ? ` · ${s.model}` : ''}`,
+    `- **Folder:** \`${s.cwd}\``,
+    `- **Started:** ${when(s.createdAt)} · **Last activity:** ${when(s.updatedAt)}`,
+    `- **Continue here:** ${tls ? 'https' : 'http'}://localhost:${port}/#s=${s.id} (while the bridge is running)`,
+    '',
+  ];
+  const tools = new Map();
+  let buf = '';
+  let kind = '';
+  const flush = () => {
+    if (!buf.trim()) { buf = ''; kind = ''; return; }
+    if (kind === 'text') out.push(buf.trim(), '');
+    else if (kind === 'think') out.push('<details><summary>Thinking</summary>', '', buf.trim(), '', '</details>', '');
+    else out.push(fenced(clip(stripAnsi(buf), 60)), '');
+    buf = '';
+    kind = '';
+  };
+  const toolBlock = (t) => {
+    const head = `⏺ ${t.name.charAt(0).toUpperCase()}${t.name.slice(1)}(${t.summary.split('\n')[0].slice(0, 300)})`;
+    const res = t.result == null ? '⎿ (no result yet)' : `⎿ ${clip(t.result || '(no output)', 12).replace(/\n/g, '\n  ')}`;
+    return fenced(`${head}\n${res}${t.isError ? '  [error]' : ''}`);
+  };
+  for (const e of s.events) {
+    if (['text', 'think', 'out', 'err'].includes(e.kind)) {
+      if (buf && kind !== e.kind) flush();
+      kind = e.kind;
+      buf += e.text || '';
+      continue;
+    }
+    flush();
+    if (e.kind === 'user') {
+      const note = e.interrupt ? ' (sent with ⚡, interrupting the agent)' : e.steer ? ' (steering)' : e.queued ? ' (queued)' : '';
+      out.push('---', '', `**You** · ${when(e.ts)}${note}`, '', ...String(e.text || '').split('\n').map((l) => `> ${l}`), '');
+      if (e.thumbs?.length) out.push(`_${e.thumbs.length} photo${e.thumbs.length > 1 ? 's' : ''} attached_`, '');
+    } else if (e.kind === 'tool') {
+      const t = tools.get(e.toolId);
+      if (t) { if (e.text) t.summary = e.text; } else {
+        const nt = { name: e.tool || 'tool', summary: e.text || '', result: null, at: out.length };
+        tools.set(e.toolId, nt);
+        out.push(null, '');
+      }
+    } else if (e.kind === 'toolres') {
+      const t = tools.get(e.toolId);
+      if (t) { t.result = e.text || ''; t.isError = e.isError; } else out.push(toolBlock({ name: e.tool || 'tool', summary: '', result: e.text || '', isError: e.isError }), '');
+    } else if (e.kind === 'review') {
+      out.push(`_Reviewer ${e.verdict === 'ok' ? '✓' : e.verdict === 'concern' ? '⚠' : '–'} ${e.text}_`, '');
+    } else if (e.kind === 'ask') {
+      out.push(`> **Asked:** ${String(e.text || '').split('\n')[0]}`, '');
+    } else if (e.kind === 'answer') {
+      out.push(`> **Answer:** ${e.text}`, '');
+    } else if (e.kind === 'exit') {
+      if (e.code) out.push(`_${e.code === -1 ? e.text : `Exited with code ${e.code}`}_`, '');
+    } else if (e.text) {
+      out.push(`_${e.text.trim()}_`, '');
+    }
+  }
+  flush();
+  for (const t of tools.values()) out[t.at] = toolBlock(t);
+  return out.join('\n');
 }
 
 // ---------------------------------------------------------------- websocket (RFC 6455, server side)
@@ -1655,7 +1780,12 @@ async function handle(c, raw) {
         const thumbs = (Array.isArray(msg.thumbs) ? msg.thumbs : []).slice(0, MAX_IMAGES).filter((t) => typeof t === 'string' && t.length < 40000);
         if (!text.trim() && !images.length) throw new Error('Empty message');
         if (Buffer.byteLength(text) > MAX_PROMPT) throw new Error('Message is too long (100 KB max)');
-        sendToSession(need(msg.id), text, images, thumbs, msg.interrupt === true);
+        const s = need(msg.id);
+        const cid = typeof msg.cid === 'string' ? msg.cid.slice(0, 64) : '';
+        // A phone that lost the connection mid-send retries with the same cid; don't run the message twice.
+        if (cid && s.recentCids?.includes(cid)) return reply({ t: 'ok', duplicate: true });
+        sendToSession(s, text, images, thumbs, msg.interrupt === true);
+        if (cid) s.recentCids = [...(s.recentCids || []).slice(-49), cid];
         return reply({ t: 'ok' });
       }
       case 'set-model': setModel(need(msg.id), msg.model, msg.provider); return reply({ t: 'ok' });
@@ -1671,7 +1801,7 @@ async function handle(c, raw) {
         if (!procs.get(s.id)) startProcess(s, h, null);
         return reply({ t: 'ok' });
       }
-      case 'rename': { const s = need(msg.id); s.title = String(msg.title || s.title).slice(0, 120); broadcastSessions(); scheduleSave(); return reply({ t: 'ok' }); }
+      case 'rename': { const s = need(msg.id); s.title = String(msg.title || s.title).slice(0, 120); broadcastSessions(); scheduleSave(); markTranscript(s); return reply({ t: 'ok' }); }
       case 'delete': deleteSession(need(msg.id)); return reply({ t: 'ok' });
       case 'ping': return reply({ t: 'pong' });
       default: throw new Error(`Unknown message type: ${msg.t}`);
@@ -1715,6 +1845,27 @@ function json(res, status, obj) {
 
 async function onRequest(req, res) {
   const url = new URL(req.url, 'http://x');
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-frame-options': 'DENY',
+      'referrer-policy': 'no-referrer',
+      'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    });
+    return res.end(WEB_PAGE);
+  }
+  if (req.method === 'GET' && url.pathname === '/local-token') {
+    // Lets the page open without a token when it is loaded on this computer itself. The Host check stops
+    // DNS-rebinding pages, and other sites can't read the reply because it carries no CORS headers.
+    const fromHere = /^(127\.|::1$|::ffff:127\.)/.test(req.socket.remoteAddress || '');
+    const hostName = (req.headers.host || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+    const site = req.headers['sec-fetch-site'];
+    if (fromHere && ['localhost', '127.0.0.1', '::1'].includes(hostName) && (!site || site === 'same-origin')) {
+      return json(res, 200, { token: config.token });
+    }
+    return json(res, 403, { error: 'Only available on the computer running the bridge' });
+  }
   if (req.method === 'GET' && url.pathname === '/health') {
     return json(res, 200, { ok: true, name: 'harness-bridge', version: VERSION, protocol: PROTOCOL, host: os.hostname() });
   }
@@ -1745,6 +1896,15 @@ function onUpgrade(req, socket) {
   if (url.pathname !== '/ws' || !key || (req.headers.upgrade || '').toLowerCase() !== 'websocket') {
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     return;
+  }
+  const origin = req.headers.origin;
+  if (origin) {
+    let same = false;
+    try { same = new URL(origin).host === req.headers.host; } catch {}
+    if (!same) {
+      socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+      return;
+    }
   }
   if (!tokenOk(token)) {
     socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -1785,11 +1945,14 @@ server.listen(port, host, () => {
     console.log('\nReachable at:');
     for (const a of addrs) console.log(`  ${scheme}://${a.address}:${port}  (${a.name}${a.tailscale ? ', Tailscale' : ''})`);
   }
+  console.log(`\nOn this computer: open ${scheme}://localhost:${port} in a browser to see the same sessions and carry on typing there.`);
+  if (transcriptsDir) console.log(`Chats are also saved as Markdown in ${transcriptsDir}`);
   console.log(`\nPairing code: ${pairing.code}   (valid 10 minutes, one use)`);
   console.log('Open Harness Remote on your phone → Add computer → enter the address and this code.\n');
   if (!tls) console.log('Traffic is not encrypted. Use Tailscale/WireGuard or set "tls" in the config when off your home network.\n');
   if (IS_WIN) console.log('Windows: if the phone cannot connect, allow Node.js through Windows Defender Firewall for Private networks and make sure your Wi-Fi is set to Private.\n');
   console.log('Leave this window open while you use the app. Press Ctrl+C to stop.\n');
+  for (const x of sessions.values()) markTranscript(x);
 });
 
 server.on('error', async (e) => {
@@ -1818,8 +1981,570 @@ function shutdown() {
   saveTimer = null;
   const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, thinking, permissions, review, reviewModel, reviewProvider, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, thinking, permissions, review, reviewModel, reviewProvider, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
   try { saveJson(sessionsPath, data, 0o600); } catch {}
+  if (transcriptDirty.size) flushTranscripts();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+// ---------------------------------------------------------------- web page
+
+// The same chats in a browser on the computer (or anywhere on your tailnet). Served at /.
+const WEB_PAGE = String.raw`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness Remote</title>
+<style>
+:root{--bg:#0a0a0a;--surface:#141414;--high:#222;--text:#ece8e4;--gray:#8a8580;--red:#e5383b;--green:#3ddc84;--amber:#f5a524;--mono:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono",Menlo,monospace}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button{font:inherit;color:inherit;background:var(--high);border:1px solid #333;border-radius:8px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:#555}
+button.primary{background:var(--red);border-color:var(--red);color:#fff}
+button.ghost{background:none;border-color:transparent;color:var(--gray)}
+button:disabled{opacity:.45;cursor:default}
+input,select,textarea{font:inherit;color:var(--text);background:var(--bg);border:1px solid #333;border-radius:8px;padding:8px 10px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--red)}
+#app{display:flex;height:100%}
+#side{width:300px;flex:none;border-right:1px solid var(--high);display:flex;flex-direction:column;background:var(--surface)}
+#side header{padding:14px 14px 8px;display:flex;align-items:center;gap:8px}
+#side h1{font-size:16px;margin:0;flex:1}
+#conn{font-size:12px;padding:0 14px 10px;color:var(--gray)}
+#list{overflow-y:auto;flex:1;padding:0 8px 8px}
+.srow{padding:10px;border-radius:8px;cursor:pointer;margin-bottom:2px}
+.srow:hover{background:var(--high)}
+.srow.on{background:#2a1416}
+.srow .t{display:flex;align-items:center;gap:8px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow .m,.srow .p{font-size:12px;color:var(--gray);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--gray)}
+.dot.running{background:var(--amber)}.dot.waiting{background:var(--red)}.dot.idle{background:var(--green)}
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+#top{padding:12px 18px;border-bottom:1px solid var(--high);display:flex;align-items:center;gap:12px;min-height:58px}
+#top .ti{flex:1;min-width:0}
+#top .ti b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#top .ti span{font-size:12px;color:var(--gray)}
+#log{flex:1;overflow-y:auto;padding:16px 18px 8px}
+#log>*{max-width:900px;margin-left:auto;margin-right:auto}
+.user{display:flex;flex-direction:column;align-items:flex-end;margin:10px auto}
+.user .b{background:#2c1416;border-radius:14px;padding:8px 14px;max-width:80%;white-space:pre-wrap;word-wrap:break-word}
+.user .n{font-size:12px;color:var(--amber);margin-top:3px}
+.user img{width:72px;height:72px;object-fit:cover;border-radius:8px;margin-left:6px}
+.say{margin:10px auto;word-wrap:break-word}
+.say p{margin:0 0 8px}.say h1,.say h2,.say h3{font-size:1.05em;margin:10px 0 6px}
+.say pre,.out{background:#161616;border-radius:6px;padding:10px;overflow-x:auto;font:12.5px/1.4 var(--mono);white-space:pre}
+.out.err{color:#ff9a9a}
+code{font-family:var(--mono);background:#222;padding:1px 4px;border-radius:4px;font-size:.9em}
+pre code{background:none;padding:0}
+details{margin:8px auto}
+summary{cursor:pointer;color:var(--gray);list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::after{content:" ›"}
+details[open]>summary::after{content:" ⌄"}
+.think .body{color:var(--gray);font-style:italic;white-space:pre-wrap;border-left:2px solid #333;padding-left:10px;margin-top:6px}
+.tool{margin:8px auto;font-family:var(--mono);font-size:13px}
+.tool .h{display:flex;gap:8px;align-items:baseline}
+.tool .h i{width:8px;height:8px;border-radius:50%;background:var(--green);flex:none;transform:translateY(-1px)}
+.tool .h i.err{background:var(--red)}.tool .h i.run{background:var(--amber);animation:blink 1s infinite}
+.tool .h b{font-weight:600;white-space:pre-wrap;word-break:break-all}
+.tool .res{margin-left:16px;color:var(--gray);white-space:pre-wrap;word-break:break-all}
+.tool .res.err{color:#ff8080}
+.tool details{margin:0 0 0 16px}
+.rev{margin-left:16px;font-family:system-ui,sans-serif;font-size:13px}
+.rev.ok b{color:var(--green)}.rev.concern b{color:var(--red)}.rev.error b{color:var(--gray)}
+.rev span{color:var(--gray)}
+.note{color:var(--gray);font-size:13px;margin:6px auto}
+.note.bad{color:var(--red)}
+.ask{border:1px solid var(--red);border-radius:10px;padding:12px;margin:10px auto;background:#1a0d0e}
+.ask .q{white-space:pre-wrap;font-family:var(--mono);font-size:13px;margin-bottom:10px}
+.ask .opts{display:flex;flex-wrap:wrap;gap:8px}
+.ask.done{border-color:#333;background:none;padding:6px 12px}
+.ask.done .q{margin:0;color:var(--gray)}
+#act{max-width:900px;margin:0 auto;padding:4px 18px;color:var(--red);font-size:13px;min-height:24px}
+#act .g{color:var(--gray)}
+#compose{border-top:1px solid var(--high);padding:12px 18px;display:flex;gap:8px;align-items:flex-end;background:var(--surface)}
+#compose textarea{flex:1;resize:none;min-height:42px;max-height:220px}
+#empty{margin:auto;color:var(--gray);text-align:center;padding:30px}
+dialog{background:var(--surface);color:var(--text);border:1px solid #333;border-radius:12px;padding:20px;width:min(520px,94vw)}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+dialog label{display:block;font-size:12px;color:var(--red);font-weight:700;margin:12px 0 4px;letter-spacing:.04em}
+dialog input[type=text],dialog select{width:100%}
+dialog .chk{display:flex;gap:8px;align-items:center;color:var(--text);font-weight:400;font-size:14px;letter-spacing:0}
+dialog .row{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.hint{font-size:12px;color:var(--gray)}
+@keyframes blink{50%{opacity:.3}}
+@media (max-width:700px){#side{display:none}#app.list #side{display:flex;width:100%}#app.list #main{display:none}#back{display:inline-block!important}}
+</style>
+</head>
+<body>
+<div id="app" class="list">
+  <aside id="side">
+    <header><h1>Harness Remote</h1><button class="primary" id="newBtn">+ New</button></header>
+    <div id="conn">Connecting…</div>
+    <div id="list"></div>
+  </aside>
+  <main id="main">
+    <div id="top"><button class="ghost" id="back" style="display:none">‹</button><div class="ti"><b id="title">No session open</b><span id="sub"></span></div><button id="stopBtn" style="display:none">Stop</button></div>
+    <div id="log"><div id="empty">Pick a session on the left, or start a new one.<br>Sessions you start on your phone show up here too, and stay in sync.</div></div>
+    <div id="act"></div>
+    <div id="compose" style="display:none">
+      <textarea id="input" rows="1" placeholder="Message"></textarea>
+      <button id="nowBtn" title="Stop the current step and send this now" style="display:none">⚡ Send now</button>
+      <button class="primary" id="sendBtn">Send</button>
+    </div>
+  </main>
+</div>
+
+<dialog id="tokenDlg">
+  <h3 style="margin-top:0">Connect to this bridge</h3>
+  <p class="hint">On the computer running the bridge this page connects by itself. From another device, paste the bridge token. It is the <code>"token"</code> value in <code>~/.harness-remote/config.json</code> on that computer (on Windows: <code>C:\Users\&lt;you&gt;\.harness-remote\config.json</code>).</p>
+  <input type="text" id="tokenIn" placeholder="Token" style="width:100%" autocomplete="off">
+  <div class="row"><button class="primary" id="tokenOk">Connect</button></div>
+</dialog>
+
+<dialog id="newDlg">
+  <h3 style="margin-top:0">New session</h3>
+  <label>HARNESS</label><select id="nHarness"></select>
+  <label>FOLDER</label><input type="text" id="nCwd" list="nCwdList"><datalist id="nCwdList"></datalist>
+  <div id="nModelBox"><label>MODEL</label><select id="nModel"></select><div class="hint" id="nModelHint"></div></div>
+  <div id="nPermBox">
+    <label>SAFETY</label>
+    <div class="chk"><input type="checkbox" id="nPerm" checked> Ask before commands and edits</div>
+    <div class="chk"><input type="checkbox" id="nReview" checked> Reviewer checks each command first</div>
+  </div>
+  <div class="hint" id="nErr" style="color:var(--red);margin-top:10px"></div>
+  <div class="row"><button class="ghost" id="nCancel">Cancel</button><button class="primary" id="nCreate">Start</button></div>
+</dialog>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var store = {
+    get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {} }
+  };
+  var token = null, ws = null, rid = 0, pending = {}, attempt = 0, retryTimer = null;
+  var hello = null, sessions = [], current = null, events = {}, synced = {}, activity = {}, progress = {}, clockOffset = 0;
+  var answered = {};
+
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  function inline(s) {
+    return s.replace(/\x60([^\x60\n]+)\x60/g, '<code>$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+      .replace(/(^|[^\w*])\*([^*\s][^*\n]*?)\*(?!\w)/g, '$1<i>$2</i>');
+  }
+  function markdown(src) {
+    var out = [], lines = esc(src).replace(/\r\n/g, '\n').split('\n'), para = [];
+    function endPara() { if (para.length) out.push('<p>' + inline(para.join('<br>')) + '</p>'); para = []; }
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i], m;
+      if (/^\s*\x60\x60\x60/.test(l)) {
+        endPara(); var code = []; i++;
+        while (i < lines.length && !/^\s*\x60\x60\x60/.test(lines[i])) code.push(lines[i++]);
+        out.push('<pre><code>' + code.join('\n') + '</code></pre>');
+      } else if (!l.trim()) endPara();
+      else if ((m = /^(#{1,6})\s+(.*)$/.exec(l))) { endPara(); out.push('<h3>' + inline(m[2]) + '</h3>'); }
+      else if ((m = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(l))) { endPara(); out.push('<p style="margin:0 0 4px ' + (m[1].length * 7 + 4) + 'px">' + (/\d/.test(m[2]) ? m[2] : '•') + ' ' + inline(m[3]) + '</p>'); }
+      else para.push(l);
+    }
+    endPara();
+    return out.join('');
+  }
+
+  // ------------------------------------------------------------ connection
+
+  function setConn(text, color) { var c = $('conn'); c.textContent = text; c.style.color = color || 'var(--gray)'; }
+
+  function start() {
+    var m = /[#&]token=([^&]+)/.exec(location.hash);
+    if (m) { store.set('hr-token', decodeURIComponent(m[1])); history.replaceState(null, '', location.pathname + location.search); }
+    token = store.get('hr-token');
+    if (token) return open();
+    fetch('/local-token', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+      if (j && j.token) { token = j.token; store.set('hr-token', token); open(); } else askToken();
+    }).catch(askToken);
+  }
+  function askToken() { setConn('Not connected'); $('tokenDlg').showModal(); }
+  $('tokenOk').onclick = function () { var t = $('tokenIn').value.trim(); if (!t) return; token = t; store.set('hr-token', t); $('tokenDlg').close(); open(); };
+
+  function open() {
+    clearTimeout(retryTimer);
+    setConn('Connecting…', 'var(--amber)');
+    var sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?token=' + encodeURIComponent(token));
+    ws = sock;
+    var opened = false;
+    sock.onopen = function () { opened = true; attempt = 0; };
+    sock.onmessage = function (m) { if (sock === ws) { try { handle(JSON.parse(m.data)); } catch (e) { console.error(e); } } };
+    sock.onclose = function () {
+      if (sock !== ws) return;
+      ws = null;
+      for (var k in pending) pending[k].reject(new Error('Disconnected'));
+      pending = {};
+      if (!opened && attempt === 0 && !hello) { store.set('hr-token', null); token = null; return start(); }
+      var wait = Math.min(30, Math.pow(2, Math.min(attempt, 5))); attempt++;
+      setConn('Reconnecting in ' + wait + 's…', 'var(--amber)');
+      retryTimer = setTimeout(open, wait * 1000);
+    };
+  }
+  window.addEventListener('online', function () { if (!ws) open(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && !ws && token) open(); });
+
+  function request(type, body) {
+    return new Promise(function (resolve, reject) {
+      if (!ws || ws.readyState !== 1) return reject(new Error('Not connected to the bridge'));
+      var id = ++rid, msg = Object.assign({ t: type, rid: id }, body || {});
+      pending[id] = { resolve: resolve, reject: reject };
+      ws.send(JSON.stringify(msg));
+      setTimeout(function () { if (pending[id]) { delete pending[id]; reject(new Error('The bridge did not answer')); } }, 20000);
+    }).then(function (r) { if (r.t === 'error') throw new Error(r.error); return r; });
+  }
+
+  function handle(o) {
+    if (o.rid != null && pending[o.rid]) { var p = pending[o.rid]; delete pending[o.rid]; p.resolve(o); if (o.t !== 'hello') return; }
+    if (o.t === 'hello') {
+      hello = o; clockOffset = Date.now() - (o.now || Date.now());
+      setConn('Connected · ' + o.host + ' · bridge ' + o.version, 'var(--green)');
+      setSessions(o.sessions);
+      if (current) subscribe(current);
+      else { var want = decodeURIComponent((/[#&]s=([^&]+)/.exec(location.hash) || [])[1] || '') || store.get('hr-last'); if (want && sessions.some(function (s) { return s.id === want; })) select(want); }
+    } else if (o.t === 'sessions') setSessions(o.sessions);
+    else if (o.t === 'event') {
+      var list = events[o.id]; if (!list) return;
+      if (!list.length || o.ev.seq > list[list.length - 1].seq) list.push(o.ev);
+      if (o.ev.kind === 'toolres' && progress[o.id]) delete progress[o.id][o.ev.toolId];
+      if (o.id === current) scheduleRender();
+    } else if (o.t === 'activity') { activity[o.id] = o.activity; if (o.id === current) renderActivity(); }
+    else if (o.t === 'progress') { (progress[o.id] = progress[o.id] || {})[o.toolId] = o.text; if (o.id === current) scheduleRender(); }
+  }
+
+  function setSessions(list) {
+    var before = sessionOf(current);
+    sessions = list || [];
+    renderList();
+    if (!current) return;
+    renderTop();
+    var after = sessionOf(current);
+    if ((before && before.state) !== (after && after.state)) scheduleRender();
+  }
+
+  function subscribe(id) {
+    var list = events[id] || (events[id] = []);
+    var after = synced[id] && list.length ? list[list.length - 1].seq : 0;
+    return request('subscribe', { id: id, after: after }).then(function (r) {
+      var seen = {}; list.forEach(function (e) { seen[e.seq] = 1; });
+      r.events.forEach(function (e) { if (!seen[e.seq]) list.push(e); });
+      list.sort(function (a, b) { return a.seq - b.seq; });
+      synced[id] = true; activity[id] = r.activity;
+      if (id === current) { render(true); renderActivity(); }
+    }).catch(function (e) { if (id === current) showNote(e.message); });
+  }
+
+  // ------------------------------------------------------------ sessions list
+
+  function sessionOf(id) { for (var i = 0; i < sessions.length; i++) if (sessions[i].id === id) return sessions[i]; return null; }
+  function harnessOf(s) { if (!hello || !s) return null; for (var i = 0; i < hello.harnesses.length; i++) if (hello.harnesses[i].id === s.harness) return hello.harnesses[i]; return null; }
+  function base(p) { return String(p || '').split(/[\\/]/).filter(Boolean).pop() || p; }
+  function busy(s) { return s && (s.state === 'running' || s.state === 'waiting'); }
+
+  function renderList() {
+    var box = $('list'); box.textContent = '';
+    if (!sessions.length) box.appendChild(el('div', 'note', 'No sessions yet.'));
+    sessions.forEach(function (s) {
+      var r = el('div', 'srow' + (s.id === current ? ' on' : ''));
+      var t = el('div', 't'); t.appendChild(el('span', 'dot ' + s.state)); t.appendChild(el('span', null, s.title)); r.appendChild(t);
+      var h = harnessOf(s);
+      r.appendChild(el('div', 'm', (h ? h.name : s.harness) + ' · ' + base(s.cwd) + (s.model ? ' · ' + s.model : '')));
+      if (s.preview) r.appendChild(el('div', 'p', s.preview));
+      r.onclick = function () { select(s.id); };
+      box.appendChild(r);
+    });
+  }
+
+  function select(id) {
+    current = id; store.set('hr-last', id);
+    $('app').classList.remove('list');
+    $('compose').style.display = 'flex';
+    renderList(); renderTop();
+    events[id] = events[id] || [];
+    render(true);
+    subscribe(id);
+    restoreDraft();
+    $('input').focus();
+  }
+  $('back').onclick = function () { $('app').classList.add('list'); };
+
+  function renderTop() {
+    var s = sessionOf(current), h = harnessOf(s);
+    $('title').textContent = s ? s.title : 'Session deleted';
+    $('sub').textContent = s ? [s.state, h ? h.name : s.harness, s.model, s.thinking ? 'effort ' + s.thinking : '', s.review ? 'reviewer' : '', s.cwd].filter(Boolean).join(' · ') : '';
+    $('stopBtn').style.display = busy(s) ? '' : 'none';
+    var interactive = h && h.mode === 'interactive';
+    $('nowBtn').style.display = busy(s) && !interactive ? '' : 'none';
+    $('input').placeholder = !s ? '' : s.state === 'waiting' ? 'Answer the card above, or type a message' :
+      busy(s) && h && h.mode === 'rpc' ? 'Message: read after this step (Enter) · ⚡ sends now' :
+      busy(s) && !interactive ? 'Queue a message for after this turn' : 'Message ' + (h ? h.name : 'the harness') + '  (Enter to send, Shift+Enter for a new line)';
+    renderActivity();
+  }
+  $('stopBtn').onclick = function () { request('stop', { id: current }).catch(function (e) { showNote(e.message); }); };
+
+  // ------------------------------------------------------------ transcript
+
+  var renderPending = false;
+  function scheduleRender() { if (renderPending) return; renderPending = true; requestAnimationFrame(function () { renderPending = false; render(false); }); }
+
+  function build(list) {
+    var out = [], buf = '', kind = '', tools = {}, asks = {};
+    function flush() {
+      if (!buf) return;
+      if (kind === 'text') splitThink(buf.trim()).forEach(function (x) { out.push(x); });
+      else if (kind === 'think') { if (buf.trim()) out.push({ type: 'think', text: buf.trim() }); }
+      else { var t = buf.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '').replace(/\r(?!\n)/g, '\n').replace(/\n+$/, ''); if (t.trim()) out.push({ type: 'out', text: t, err: kind === 'err' }); }
+      buf = ''; kind = '';
+    }
+    list.forEach(function (e) {
+      switch (e.kind) {
+        case 'out': case 'err': case 'text': case 'think':
+          if (buf && e.kind !== kind) flush();
+          kind = e.kind; buf += e.text || ''; break;
+        case 'user': flush(); out.push({ type: 'user', e: e }); break;
+        case 'tool': flush();
+          if (tools[e.toolId] != null) { var t = out[tools[e.toolId]]; if (e.text) t.summary = e.text; t.preparing = e.preparing; }
+          else { tools[e.toolId] = out.length; out.push({ type: 'tool', id: e.toolId, name: e.tool || 'tool', summary: e.text || '', preparing: e.preparing, child: !!e.parent }); }
+          break;
+        case 'toolres': flush();
+          if (tools[e.toolId] != null) { var r = out[tools[e.toolId]]; r.result = e.text || ''; r.isError = e.isError; }
+          else out.push({ type: 'tool', id: e.toolId, name: e.tool || 'tool', summary: '', result: e.text || '', isError: e.isError });
+          break;
+        case 'review': flush();
+          var rv = { verdict: e.verdict, text: e.text };
+          for (var i = out.length - 1; i >= 0; i--) if (out[i].type === 'tool') { if (!out[i].review) { out[i].review = rv; rv = null; } break; }
+          if (rv) out.push({ type: 'review', review: rv });
+          break;
+        case 'ask': flush(); asks[e.askId] = out.length; out.push({ type: 'ask', e: e, answer: null }); break;
+        case 'answer': if (asks[e.askId] != null) out[asks[e.askId]].answer = e.text; break;
+        case 'exit': flush();
+          if (/^Stopped/.test(e.text || '')) out.push({ type: 'note', text: 'Interrupted' });
+          else if (e.code === -1) out.push({ type: 'note', text: e.text, bad: true });
+          else if (e.code != null && e.code !== 0) out.push({ type: 'note', text: 'Error · exited with code ' + e.code, bad: true });
+          break;
+        default: flush(); if (e.text) out.push({ type: 'note', text: e.text });
+      }
+    });
+    flush();
+    return out;
+  }
+
+  function splitThink(text) {
+    if (!text) return [];
+    var close = /<\/(think|thinking|reasoning)>/i, open = /<(think|thinking|reasoning)>/i, out = [], m;
+    var c = close.exec(text), o = open.exec(text);
+    if (c && (!o || c.index < o.index)) { var th = text.slice(0, c.index).trim(); if (th) out.push({ type: 'think', text: th }); text = text.slice(c.index + c[0].length); }
+    while ((m = open.exec(text))) {
+      var before = text.slice(0, m.index).trim(); if (before) out.push({ type: 'say', text: before });
+      text = text.slice(m.index + m[0].length);
+      var cc = close.exec(text);
+      if (!cc) { if (text.trim()) out.push({ type: 'think', text: text.trim(), live: true }); return out; }
+      if (text.slice(0, cc.index).trim()) out.push({ type: 'think', text: text.slice(0, cc.index).trim() });
+      text = text.slice(cc.index + cc[0].length);
+    }
+    if (text.trim()) out.push({ type: 'say', text: text.trim() });
+    return out;
+  }
+
+  var openDetails = {};
+  function details(key, label, body, cls) {
+    var d = el('details', cls); d.open = !!openDetails[key];
+    d.ontoggle = function () { openDetails[key] = d.open; };
+    d.appendChild(el('summary', null, label)); d.appendChild(body); return d;
+  }
+
+  function render(jump) {
+    var log = $('log'), s = sessionOf(current), list = events[current] || [];
+    var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    var items = build(list), frag = document.createDocumentFragment();
+    var waiting = s && s.state === 'waiting', lastAsk = -1;
+    items.forEach(function (it, i) { if (it.type === 'ask' && !it.answer) lastAsk = i; });
+    items.forEach(function (it, i) {
+      var key = it.type + i;
+      if (it.type === 'user') {
+        var u = el('div', 'user'), b = el('div', 'b', it.e.text || '');
+        (it.e.thumbs || []).forEach(function (t) { if (/^[A-Za-z0-9+\/=]+$/.test(t)) { var im = el('img'); im.src = 'data:image/jpeg;base64,' + t; b.appendChild(im); } });
+        u.appendChild(b);
+        if (it.e.interrupt) u.appendChild(el('div', 'n', 'interrupted the agent to send this now'));
+        else if (it.e.steer) u.appendChild(el('div', 'n', 'steering: read after the current step'));
+        else if (it.e.queued) u.appendChild(el('div', 'n', 'queued for after this turn'));
+        frag.appendChild(u);
+      } else if (it.type === 'say') {
+        var sy = el('div', 'say'); sy.innerHTML = markdown(it.text); frag.appendChild(sy);
+      } else if (it.type === 'think') {
+        frag.appendChild(details(key, it.live ? 'Thinking…' : 'Thought', el('div', 'body', it.text), 'think'));
+      } else if (it.type === 'out') {
+        frag.appendChild(el('div', 'out' + (it.err ? ' err' : ''), it.text));
+      } else if (it.type === 'tool') {
+        var t = el('div', 'tool'), h = el('div', 'h');
+        var running = it.result == null;
+        h.appendChild(el('i', running ? 'run' : it.isError ? 'err' : ''));
+        var nm = it.name.charAt(0).toUpperCase() + it.name.slice(1);
+        h.appendChild(el('b', null, nm + (it.summary ? '(' + it.summary.split('\n')[0].slice(0, 300) + ')' : '') + (it.preparing ? ' …' : '')));
+        t.appendChild(h);
+        if (it.summary && it.summary.indexOf('\n') > 0) t.appendChild(details(key + 'a', 'full input', el('div', 'res', it.summary)));
+        if (it.review) { var rv = el('div', 'rev ' + it.review.verdict); rv.appendChild(el('b', null, 'Reviewer ' + (it.review.verdict === 'ok' ? '✓ ' : it.review.verdict === 'concern' ? '⚠ ' : '– '))); rv.appendChild(el('span', null, it.review.text)); t.appendChild(rv); }
+        var live = progress[current] && progress[current][it.id];
+        if (running && live) t.appendChild(el('div', 'res', '⎿ ' + live.split('\n').slice(-8).join('\n')));
+        if (!running) {
+          var res = (it.result || '').replace(/\n+$/, ''), first = res.split('\n').slice(0, 3).join('\n');
+          var lines = res.split('\n').length;
+          if (!res) t.appendChild(el('div', 'res', '⎿ (no output)'));
+          else if (lines <= 3 && res.length < 400) t.appendChild(el('div', 'res' + (it.isError ? ' err' : ''), '⎿ ' + res));
+          else t.appendChild(details(key + 'r', '⎿ ' + first.slice(0, 300) + '  (' + lines + ' lines)', el('div', 'res' + (it.isError ? ' err' : ''), res)));
+        }
+        frag.appendChild(t);
+      } else if (it.type === 'review') {
+        var r2 = el('div', 'rev ' + it.review.verdict); r2.appendChild(el('b', null, 'Reviewer ' + (it.review.verdict === 'ok' ? '✓ ' : '⚠ '))); r2.appendChild(el('span', null, it.review.text)); frag.appendChild(r2);
+      } else if (it.type === 'ask') {
+        frag.appendChild(askCard(it, waiting && i === lastAsk && !answered[it.e.askId]));
+      } else if (it.type === 'note') {
+        frag.appendChild(el('div', 'note' + (it.bad ? ' bad' : ''), it.text));
+      }
+    });
+    if (!list.length && s) frag.appendChild(el('div', 'note', 'Loading…'));
+    log.textContent = ''; log.appendChild(frag);
+    if (jump || atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  function askCard(it, live) {
+    var e = it.e, c = el('div', 'ask' + (live ? '' : ' done'));
+    var first = (e.text || '').split('\n')[0];
+    if (!live) {
+      var ans = it.answer || answered[e.askId];
+      c.appendChild(el('div', 'q', (ans ? (/^(no|cancelled)$/i.test(ans) ? '✗ ' : '✓ ') : '· ') + first + (ans ? '  →  ' + ans : '  (no longer waiting)')));
+      return c;
+    }
+    c.appendChild(el('div', 'q', e.text || ''));
+    var opts = el('div', 'opts');
+    function send(body, shown) {
+      answered[e.askId] = shown;
+      request('answer', Object.assign({ id: current, askId: e.askId }, body)).catch(function (err) { delete answered[e.askId]; showNote(err.message); render(false); });
+      render(false);
+    }
+    if (e.method === 'select' && e.options && e.options.length) {
+      e.options.forEach(function (o) {
+        var b = el('button', /^(no|cancel)/i.test(o) ? '' : /^yes/i.test(o) && /^⚠/.test(e.text || '') ? '' : /^yes|^allow/i.test(o) ? 'primary' : '', o);
+        b.onclick = function () { send({ value: o }, o); }; opts.appendChild(b);
+      });
+    } else if (e.method === 'confirm') {
+      var no = el('button', null, 'No'), yes = el('button', 'primary', 'Yes');
+      no.onclick = function () { send({ confirmed: false }, 'No'); }; yes.onclick = function () { send({ confirmed: true }, 'Yes'); };
+      opts.appendChild(no); opts.appendChild(yes);
+    } else {
+      var inp = el('input'); inp.type = 'text'; inp.placeholder = e.placeholder || ''; inp.style.flex = '1';
+      var ok = el('button', 'primary', 'Answer'); ok.onclick = function () { send({ value: inp.value }, inp.value); };
+      opts.appendChild(inp); opts.appendChild(ok);
+    }
+    var cancel = el('button', 'ghost', 'Dismiss'); cancel.onclick = function () { send({ cancelled: true }, 'Cancelled'); }; opts.appendChild(cancel);
+    c.appendChild(opts);
+    return c;
+  }
+
+  function renderActivity() {
+    var box = $('act'), s = sessionOf(current), a = activity[current];
+    box.textContent = '';
+    if (!busy(s)) return;
+    var label = s.state === 'waiting' ? 'Waiting for your answer' : a && a.label ? a.label : 'Working';
+    box.appendChild(document.createTextNode('✻ ' + label + '… '));
+    var since = (a && a.since) || s.runningSince;
+    var extra = [];
+    if (since) extra.push(Math.max(0, Math.round((Date.now() - clockOffset - since) / 1000)) + 's');
+    if (a && a.chars) extra.push('~' + Math.round(a.chars / 4) + ' tokens');
+    if (extra.length) box.appendChild(el('span', 'g', '(' + extra.join(' · ') + ')'));
+  }
+  setInterval(renderActivity, 1000);
+
+  function showNote(text) { var n = el('div', 'note bad', text); $('log').appendChild(n); $('log').scrollTop = $('log').scrollHeight; }
+
+  // ------------------------------------------------------------ composer
+
+  var input = $('input');
+  function draftKey() { return 'hr-draft-' + current; }
+  function restoreDraft() { input.value = store.get(draftKey()) || ''; grow(); }
+  function grow() { input.style.height = 'auto'; input.style.height = Math.min(220, input.scrollHeight + 2) + 'px'; }
+  input.addEventListener('input', function () { grow(); store.set(draftKey(), input.value || null); });
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(false); }
+  });
+  $('sendBtn').onclick = function () { send(false); };
+  $('nowBtn').onclick = function () { send(true); };
+
+  function send(interrupt) {
+    var text = input.value;
+    if (!text.trim() || !current) return;
+    var cid = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    input.value = ''; grow(); store.set(draftKey(), null);
+    request('send', { id: current, text: text, interrupt: interrupt || undefined, cid: cid }).catch(function (e) {
+      if (!input.value) { input.value = text; grow(); store.set(draftKey(), text); }
+      showNote('Not sent: ' + e.message);
+    });
+  }
+
+  // ------------------------------------------------------------ new session
+
+  var models = null;
+  $('newBtn').onclick = function () {
+    if (!hello) return;
+    var sel = $('nHarness'); sel.textContent = '';
+    hello.harnesses.forEach(function (h) { var o = el('option', null, h.name + (h.available ? '' : ' (unavailable)')); o.value = h.id; o.disabled = !h.available; sel.appendChild(o); });
+    var lastH = store.get('hr-harness'); if (lastH && hello.harnesses.some(function (h) { return h.id === lastH && h.available; })) sel.value = lastH;
+    else { var firstOk = hello.harnesses.filter(function (h) { return h.available; })[0]; if (firstOk) sel.value = firstOk.id; }
+    var dl = $('nCwdList'); dl.textContent = '';
+    var recent = []; try { recent = JSON.parse(store.get('hr-recent') || '[]'); } catch (e) {}
+    var cur = sessionOf(current);
+    recent.concat(cur ? [cur.cwd] : []).concat(hello.roots).forEach(function (p) { var o = el('option'); o.value = p; dl.appendChild(o); });
+    $('nCwd').value = recent[0] || (cur && cur.cwd) || hello.roots[0] || '';
+    $('nErr').textContent = '';
+    $('newDlg').showModal();
+    onHarness();
+    request('models').then(function (m) { models = m; onHarness(); }).catch(function (e) { $('nModelHint').textContent = e.message; });
+  };
+  $('nHarness').onchange = onHarness;
+  function onHarness() {
+    var h = hello.harnesses.filter(function (x) { return x.id === $('nHarness').value; })[0];
+    var provs = (h && h.models) || [];
+    $('nModelBox').style.display = provs.length ? '' : 'none';
+    $('nPermBox').style.display = h && h.mode === 'rpc' ? '' : 'none';
+    var sel = $('nModel'); sel.textContent = '';
+    if (!models) { $('nModelHint').textContent = 'Loading models…'; return; }
+    var names = { lmstudio: 'LM Studio', ollama: 'Ollama' }, hint = [];
+    provs.forEach(function (p) {
+      var g = el('optgroup'); g.label = names[p] || p;
+      (models[p] || []).forEach(function (m) { var name = m.name || m.id || m; var o = el('option', null, name + (m.vision ? ' · vision' : '')); o.value = p + '\n' + name; g.appendChild(o); });
+      if (g.children.length) sel.appendChild(g);
+      if (models.errors && models.errors[p]) hint.push((names[p] || p) + ': ' + models.errors[p]);
+    });
+    var last = store.get('hr-model'); if (last) for (var i = 0; i < sel.options.length; i++) if (sel.options[i].value === last) sel.value = last;
+    $('nModelHint').textContent = hint.join(' · ');
+  }
+  $('nCancel').onclick = function () { $('newDlg').close(); };
+  $('nCreate').onclick = function () {
+    var h = $('nHarness').value, cwd = $('nCwd').value.trim(), mv = ($('nModel').value || '').split('\n');
+    var body = { harness: h, cwd: cwd, permissions: $('nPerm').checked ? 'ask' : 'auto', review: $('nReview').checked };
+    if ($('nModelBox').style.display !== 'none' && mv.length === 2) { body.provider = mv[0]; body.model = mv[1]; }
+    $('nCreate').disabled = true;
+    request('create', body).then(function (r) {
+      store.set('hr-harness', h); if (body.model) store.set('hr-model', body.provider + '\n' + body.model);
+      var recent = []; try { recent = JSON.parse(store.get('hr-recent') || '[]'); } catch (e) {}
+      store.set('hr-recent', JSON.stringify([cwd].concat(recent.filter(function (p) { return p !== cwd; })).slice(0, 6)));
+      $('newDlg').close();
+      sessions = [r.session].concat(sessions.filter(function (s) { return s.id !== r.session.id; }));
+      select(r.session.id);
+    }).catch(function (e) { $('nErr').textContent = e.message; }).then(function () { $('nCreate').disabled = false; });
+  };
+
+  start();
+})();
+</script>
+</body>
+</html>`;

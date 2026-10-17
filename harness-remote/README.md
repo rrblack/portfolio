@@ -126,6 +126,29 @@ Presets whose command isn't installed show up greyed out in the app, with the re
 - **OpenCode** needs an `lmstudio` / `ollama` provider block in `opencode.json` ([docs](https://opencode.ai/docs/providers/)).
 - Local models usually need a bigger context window than the default for agent work. In LM Studio, raise the context length when loading the model. For Ollama, set `OLLAMA_CONTEXT_LENGTH` (for example 32768).
 
+### Staying connected
+
+Sessions run on the computer, not the phone. Locking the phone, switching apps, losing Wi-Fi, turning Tailscale off, or swiping the app away doesn't stop the agent. It keeps working, and approval cards wait for you with no time limit.
+
+- **Reconnecting:** the app reconnects by itself:
+  - as soon as the phone's network changes, including Tailscale coming back on
+  - when you return to the app (it pings the bridge, and if the old connection died silently it opens a new one within about 4 seconds)
+  - otherwise on a retry timer of up to 30 s
+
+  It then fetches everything you missed. Tap the "Reconnecting…" line under the chat title to retry right away.
+- **Offline messages:** while the app is reconnecting you can still type and send. The message shows as *not sent yet* and goes out, in order, once the connection is back. Tap it to cancel. Each message carries an id, so one whose reply got lost isn't run twice.
+- **Drafts:** half-typed messages are kept per chat, even if Android closes the app.
+- **Reopening:** if Android closes the app in the background, opening it again connects to the same computer and goes back to the chat you had open. A notification keeps the connection alive while the app is in the background.
+- **Notifications:** while the app is in the background you still get notified when a session needs an answer or finishes. Tap Disconnect on the notification to stop.
+
+If the computer sleeps, the bridge sleeps with it. Set Windows to stay awake while plugged in (Settings → System → Power) for long jobs.
+
+### On your computer
+
+Open **http://localhost:8787** in a browser on the computer running the bridge. You get the same sessions as on the phone, live, and you can carry on any chat there: send messages, answer approval cards, use ⚡ send now, stop a run, or start a new session. The phone and the browser stay in sync, so you can start a task on the phone and finish it at your desk. On that computer the page connects without a token. From another device, for example a laptop on your tailnet, open `http://<computer address>:8787` and paste the token from `config.json`.
+
+Every chat is also saved as a readable Markdown file in `~/.harness-remote/transcripts` (`C:\Users\<you>\.harness-remote\transcripts` on Windows). Each file holds your messages, the agent's replies, every command with its result and the reviewer's verdict, and is updated while the session runs. Deleting a session in the app deletes its file. Set `"transcripts"` in the config to save them somewhere else, or to `false` to turn them off.
+
 ### LM Studio Bionic
 
 [Bionic](https://lmstudio.ai/docs/bionic) is a desktop app with no CLI, API or remote-control interface, so the bridge can't drive Bionic's own agent sessions. Its models run on the LM Studio runtime, though. Any model LM Studio's server lists (Developer → Start server, or `lms server start`) shows up in the app's **LM Studio** list and works with every harness above. If a model you downloaded in Bionic doesn't appear there, open it in LM Studio, or point LM Studio's models folder at the same location.
@@ -143,6 +166,7 @@ Presets whose command isn't installed show up greyed out in the app, with the re
   "ollama": "http://127.0.0.1:11434",
   "lmstudio": "http://127.0.0.1:1234",
   "tls": { "cert": "/path/cert.pem", "key": "/path/key.pem" },   // optional, e.g. from `tailscale cert`
+  "transcripts": "D:/Chats",         // optional: where Markdown copies of chats go (default ~/.harness-remote/transcripts), false to turn off
   "harnesses": [
     // override a preset…
     { "id": "aider", "args": ["{modelArgs}", "--yes-always", "--no-pretty", "--no-auto-commits", "--message", "{prompt}"] },
@@ -213,6 +237,7 @@ The guard reads the command text. It cannot see inside scripts the agent writes 
 - **Which programs the phone can start**: only harnesses listed in your config, starting in folders under `roots`. The phone can't run a command itself, but the agent it drives can run any command your account can (see above). The `shell` preset is off unless you enable it.
 - **Transport**: plain `ws://` by default. That's fine on a trusted LAN. Anywhere else, use **Tailscale** (WireGuard-encrypted), or set `tls` and the phone uses `https://`/`wss://` (enter the address with `https://`).
 - The config and transcripts are written with mode `0600`.
+- **Browser page:** served at `/` with a strict Content-Security-Policy and no framing. `GET /local-token`, which lets the page skip the token prompt, only answers requests from the computer itself, addressed to `localhost`, and not cross-site. Other websites can't read it, and DNS-rebinding pages are refused. WebSocket connections that carry a browser `Origin` must come from the bridge's own address.
 
 ## Protocol
 
@@ -226,12 +251,12 @@ JSON over a WebSocket at `/ws` (`Authorization: Bearer <token>`). Requests carry
 | `ls {path}` | `{t:"ls", path, parent, dirs[], git}` |
 | `create {harness, cwd, model, provider, title, permissions: "ask"\|"auto", review}` | `{t:"created", session}` |
 | `subscribe {id, after}` | `{t:"history", events[]}`, then live `{t:"event", id, ev}` |
-| `send {id, text, images?, interrupt?}` · `set-model {id, model, provider}` · `set-effort {id, level}` · `set-review {id, enabled, model?, provider?}` · `stdin {id, data}` · `stop {id}` · `restart {id}` · `rename {id, title}` · `delete {id}` | `{t:"ok"}` or `{t:"error", error}` |
+| `send {id, text, images?, interrupt?, cid?}` (a repeated `cid` is acknowledged and not run again) · `set-model {id, model, provider}` · `set-effort {id, level}` · `set-review {id, enabled, model?, provider?}` · `stdin {id, data}` · `stop {id}` · `restart {id}` · `rename {id, title}` · `delete {id}` | `{t:"ok"}` or `{t:"error", error}` |
 | `answer {id, askId, value \| confirmed \| cancelled}` | answers a permission or question card (`ask` event) |
 
 Event kinds: `user`, `out`, `err`, `status`, `exit`, plus, for RPC harnesses, `think`, `text`, `tool {toolId, tool}`, `toolres {toolId, isError, durationMs}`, `ask {askId, method, options}`, `answer {askId}` and `review {verdict: "ok"|"concern"|"error"}`. A `user` event sent with ⚡ has `interrupt: true`. `{t:"activity", id, activity}` reports what the agent is doing right now.
 
-The bridge also pushes `{t:"sessions", sessions[]}` whenever any session changes state (`idle` / `running` / `waiting` / `exited`). HTTP: `GET /health`, `POST /pair {code}`.
+The bridge also pushes `{t:"sessions", sessions[]}` whenever any session changes state (`idle` / `running` / `waiting` / `exited`). `ping` replies `pong`. HTTP: `GET /` (browser page), `GET /local-token`, `GET /health`, `POST /pair {code}`.
 
 ## Limitations
 
