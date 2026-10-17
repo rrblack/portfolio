@@ -1,6 +1,11 @@
 package dev.kyleporter.harnessremote.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -66,7 +71,7 @@ import kotlinx.coroutines.launch
 private sealed interface Item {
     val key: String
     data class User(override val key: String, val text: String) : Item
-    data class Output(override val key: String, val text: String) : Item
+    data class Output(override val key: String, val text: String, val err: Boolean) : Item
     data class Note(override val key: String, val text: String, val bad: Boolean) : Item
 }
 
@@ -86,17 +91,20 @@ private fun buildItems(events: List<BridgeEvent>): List<Item> {
     val out = ArrayList<Item>()
     val buf = StringBuilder()
     var bufKey = ""
+    var bufErr = false
     var part = 0
     fun flush() {
         if (buf.isEmpty()) return
         val text = cleanTerminal(buf.toString()).trimEnd('\n')
-        if (text.isNotBlank()) out += Item.Output(bufKey, text)
+        if (text.isNotBlank()) out += Item.Output(bufKey, text, bufErr)
         buf.setLength(0)
     }
     for (e in events) {
         when (e.kind) {
             "out", "err" -> {
-                if (buf.isEmpty()) bufKey = "o${e.seq}"
+                val err = e.kind == "err"
+                if (buf.isNotEmpty() && err != bufErr) flush()
+                if (buf.isEmpty()) { bufKey = "${if (err) "e" else "o"}${e.seq}"; bufErr = err }
                 buf.append(e.text)
                 if (buf.length > MAX_BLOCK) {
                     val cut = buf.lastIndexOf("\n").takeIf { it > MAX_BLOCK / 2 } ?: buf.length
@@ -104,7 +112,7 @@ private fun buildItems(events: List<BridgeEvent>): List<Item> {
                     buf.setLength(cut)
                     flush()
                     buf.append(rest.trimStart('\n'))
-                    bufKey = "o${e.seq}.${++part}"
+                    bufKey = "${if (bufErr) "e" else "o"}${e.seq}.${++part}"
                 }
             }
             "user" -> { flush(); out += Item.User("u${e.seq}", e.text) }
@@ -301,7 +309,7 @@ private fun ItemView(item: Item) {
                 )
             }
         }
-        is Item.Output -> SelectionContainer {
+        is Item.Output -> if (item.err) WarningBlock(item) else SelectionContainer {
             Text(
                 item.text,
                 Modifier.fillMaxWidth().background(Surface, RoundedCornerShape(8.dp)).padding(10.dp),
@@ -314,5 +322,33 @@ private fun ItemView(item: Item) {
             color = if (item.bad) Red else Gray, fontSize = 11.sp, textAlign = TextAlign.Center,
             fontWeight = FontWeight.Medium,
         )
+    }
+}
+
+private const val WARNING_PREVIEW_LINES = 2
+
+@Composable
+private fun WarningBlock(item: Item.Output) {
+    val lines = item.text.lines()
+    val long = lines.size > WARNING_PREVIEW_LINES
+    var expanded by rememberSaveable(item.key) { mutableStateOf(false) }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min)
+            .background(Surface.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+            .clickable(enabled = long) { expanded = !expanded },
+    ) {
+        Box(Modifier.width(3.dp).fillMaxHeight().background(Amber.copy(alpha = 0.6f), RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp)))
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Text(
+                if (long) "stderr · ${lines.size} lines · ${if (expanded) "tap to collapse" else "tap to expand"}" else "stderr",
+                color = Amber.copy(alpha = 0.8f), fontSize = 10.sp,
+            )
+            Text(
+                if (expanded || !long) item.text else lines.take(WARNING_PREVIEW_LINES).joinToString("\n") + " …",
+                fontFamily = Mono, fontSize = 11.sp, lineHeight = 14.sp, color = Gray,
+            )
+        }
     }
 }

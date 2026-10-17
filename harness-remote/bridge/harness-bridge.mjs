@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 1024 * 1024;
@@ -113,6 +113,7 @@ const PRESETS = [
     mode: 'turn',
     command: 'pi',
     args: ['--print', '--session-id', 'harness-remote-{session}', '{modelArgs}', '--', '{prompt}'],
+    ignoreStderr: ["^Warning: No project session found with id 'harness-remote-"],
     backends: {
       [LMSTUDIO]: { modelArgs: ['--provider', 'lmstudio', '--model', '{model}'], piProvider: { key: 'lmstudio', baseUrl: '{lmstudio}/v1', apiKey: 'lm-studio' } },
       [OLLAMA]: { modelArgs: ['--provider', 'ollama', '--model', '{model}'], piProvider: { key: 'ollama', baseUrl: '{ollama}/v1', apiKey: 'ollama' } },
@@ -604,13 +605,26 @@ function startProcess(s, harness, prompt) {
     p.buf[kind] += chunk.toString('utf8');
     if (!p.flushTimer) p.flushTimer = setTimeout(flush, FLUSH_MS);
   };
+  // ignoreStderr: regexes for expected noise lines, matched per complete line.
+  const ignore = (h.ignoreStderr || []).map((r) => new RegExp(r));
+  const noise = (line) => ignore.some((r) => r.test(stripAnsi(line).replace(/\r$/, '')));
+  p.errPartial = '';
+  const onErr = (chunk) => {
+    if (!ignore.length) return onData('err')(chunk);
+    const lines = (p.errPartial + chunk.toString('utf8')).split('\n');
+    p.errPartial = lines.pop();
+    const kept = lines.filter((l) => !noise(l));
+    if (kept.length) onData('err')(kept.join('\n') + '\n');
+  };
   child.stdout.on('data', onData('out'));
-  child.stderr.on('data', onData('err'));
+  child.stderr.on('data', onErr);
   child.stdin?.on('error', () => {});
   let done = false;
   const finish = (code, signal, failure) => {
     if (done) return;
     done = true;
+    if (p.errPartial && !noise(p.errPartial)) p.buf.err += p.errPartial;
+    p.errPartial = '';
     clearTimeout(p.flushTimer);
     flush();
     clearTimeout(p.waitTimer);
