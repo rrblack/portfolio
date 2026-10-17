@@ -123,7 +123,8 @@ import kotlinx.coroutines.launch
 
 private sealed interface Item {
     val key: String
-    data class User(override val key: String, val text: String, val steer: Boolean, val queued: Boolean, val thumbs: List<String>) : Item
+    data class User(override val key: String, val text: String, val steer: Boolean, val queued: Boolean, val thumbs: List<String>, val interrupt: Boolean = false) : Item
+    data class Review(override val key: String, val verdict: String, val text: String) : Item
     data class Output(override val key: String, val text: String, val err: Boolean) : Item
     data class Note(override val key: String, val text: String, val bad: Boolean) : Item
     data class Assistant(override val key: String, val text: String, val ts: Long = 0) : Item
@@ -138,6 +139,7 @@ private sealed interface Item {
         val isError: Boolean,
         val durationMs: Long,
         val preparing: Boolean = false,
+        val review: Item.Review? = null,
     ) : Item
     data class Ask(
         override val key: String,
@@ -200,7 +202,7 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
                     bufKey = "$bufKind${e.seq}.${++part}"
                 }
             }
-            "user" -> { flush(); out += Item.User("u${e.seq}", e.text, e.steer, e.queued, e.thumbs) }
+            "user" -> { flush(); out += Item.User("u${e.seq}", e.text, e.steer, e.queued, e.thumbs, e.interrupt) }
             "tool" -> {
                 flush()
                 val i = tools[e.toolId]
@@ -223,6 +225,13 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
                 flush()
                 asks[e.askId] = out.size
                 out += Item.Ask("a${e.seq}", e.askId, e.method, e.text, e.message, e.options, e.placeholder, null)
+            }
+            "review" -> {
+                flush()
+                val r = Item.Review("r${e.seq}", e.verdict, e.text)
+                val i = out.indexOfLast { it is Item.Tool }
+                val t = if (i >= 0) out[i] as Item.Tool else null
+                if (t != null && t.review == null) out[i] = t.copy(review = r) else out += r
             }
             "answer" -> {
                 val i = asks[e.askId]
@@ -379,6 +388,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                                     listOfNotNull(
                                         session?.model?.ifBlank { null } ?: harness?.name,
                                         session?.thinking?.ifBlank { null }?.let { "effort $it" },
+                                        if (session?.review == true) "reviewer" else null,
                                     ).joinToString(" · ") + if (harness?.models != null) "  ▾" else "",
                                     color = Gray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.clickable(enabled = harness?.models != null || harness?.effort == true) { showSettings = true },
@@ -516,7 +526,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                     placeholder = {
                         Text(
                             when {
-                                structured && session?.busy == true -> "Add a message: ${harness?.name} reads it after this step"
+                                structured && session?.busy == true -> "Message: read after this step · ⚡ sends now"
                                 session?.state == "waiting" -> "Answer the prompt…"
                                 session?.busy == true && !interactive -> "Queue a message for after this turn"
                                 else -> "Message ${harness?.name ?: "the harness"}"
@@ -530,6 +540,20 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Red, unfocusedBorderColor = SurfaceHigh),
                 )
                 val canSend = (input.isNotBlank() || photos.isNotEmpty()) && conn == ConnState.Connected
+                if (busy && !interactive && canSend) {
+                    IconButton(
+                        onClick = {
+                            val text = input
+                            val sending = photos.toList()
+                            input = ""
+                            photos.clear()
+                            follow = true
+                            act {
+                                try { client.send(id, text, sending, interrupt = true) } catch (e: Exception) { input = text; photos.addAll(sending); throw e }
+                            }
+                        },
+                    ) { Text("⚡", fontSize = 20.sp) }
+                }
                 IconButton(
                     enabled = canSend,
                     onClick = {
@@ -559,6 +583,10 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
             onDismiss = { showSettings = false },
             onModel = { model, provider -> act { client.setModel(id, model, provider) } },
             onEffort = { level -> act { client.setEffort(id, level) } },
+            showReviewer = harness.mode == "rpc",
+            reviewOn = session.review,
+            reviewModel = session.reviewModel,
+            onReview = { enabled, model, provider -> act { client.setReview(id, enabled, model, provider) } },
         )
     }
 
@@ -604,6 +632,7 @@ private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkin
             }
             if (item.steer) Text("sent mid-task · read after the current step", color = Gray, fontSize = 10.sp)
             if (item.queued) Text("queued · runs when the current turn finishes", color = Gray, fontSize = 10.sp)
+            if (item.interrupt) Text("interrupted the agent to send this now", color = Amber, fontSize = 10.sp)
         }
         is Item.Assistant -> Row(Modifier.fillMaxWidth()) {
             Dot(OffWhite, Modifier.padding(top = 8.dp))
@@ -612,6 +641,7 @@ private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkin
         is Item.Thinking -> ThinkingBlock(item, live = !item.done && thinkingLive)
         is Item.Tool -> ToolBlock(item, progress)
         is Item.Ask -> AskSummary(item, answerable, sentAnswer)
+        is Item.Review -> ReviewLine(item)
         is Item.Output -> if (item.err) WarningBlock(item) else SelectionContainer {
             Text(
                 item.text,
@@ -627,6 +657,22 @@ private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkin
         )
     }
 }
+
+@Composable
+private fun ReviewLine(item: Item.Review) {
+        Row(Modifier.fillMaxWidth().padding(start = 18.dp, top = 2.dp, bottom = 2.dp)) {
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(color = when (item.verdict) { "concern" -> Red; "ok" -> Green; else -> Gray }, fontWeight = FontWeight.Medium)) {
+                        append(when (item.verdict) { "concern" -> "Reviewer ⚠ "; "ok" -> "Reviewer ✓ "; else -> "Reviewer – " })
+                    }
+                    withStyle(SpanStyle(color = if (item.verdict == "concern") OffWhite else Gray)) { append(item.text) }
+                },
+                fontSize = 12.sp, lineHeight = 16.sp,
+            )
+        }
+}
+
 
 @Composable
 private fun ThinkingBlock(item: Item.Thinking, live: Boolean) {
@@ -693,6 +739,7 @@ private fun ToolBlock(item: Item.Tool, progress: String?) {
                 maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
             )
         }
+        item.review?.let { ReviewLine(it) }
         Row(Modifier.padding(start = 18.dp)) {
             Text("⎿  ", color = Gray, fontFamily = Mono, fontSize = 12.sp)
             val body = when {

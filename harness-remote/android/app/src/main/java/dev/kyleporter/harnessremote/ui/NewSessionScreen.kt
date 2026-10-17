@@ -73,6 +73,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
     var listing by remember { mutableStateOf<DirListing?>(null) }
     var title by remember { mutableStateOf("") }
     var askPermission by remember { mutableStateOf(true) }
+    var review by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
@@ -215,6 +216,19 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                         colors = SwitchDefaults.colors(checkedTrackColor = Red, checkedThumbColor = OffWhite),
                     )
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Reviewer", color = OffWhite, fontSize = 14.sp)
+                        Text(
+                            "A second pass by the model checks each command and file change against your request before it runs. A concern always asks you first. Adds a few seconds per command.",
+                            color = Gray, fontSize = 12.sp,
+                        )
+                    }
+                    Switch(
+                        checked = review, onCheckedChange = { review = it },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Red, checkedThumbColor = OffWhite),
+                    )
+                }
             }
 
             Section("Project folder")
@@ -276,7 +290,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     error = null
                     scope.launch {
                         try {
-                            val s = client.create(h.id, dir, if (h.models != null) model else "", if (h.models != null) provider else "", title, askPermission)
+                            val s = client.create(h.id, dir, if (h.models != null) model else "", if (h.models != null) provider else "", title, askPermission, review)
                             hub.rememberFolder(client.server.id, dir)
                             hub.route.value = Route.Session(s.id)
                         } catch (e: Exception) {

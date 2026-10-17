@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -728,6 +728,60 @@ function describeToolCall(name, input) {
   return json.length > 600 ? json.slice(0, 600) + '…' : json;
 }
 
+// Reviewer: a second model call that checks a tool call against what the user asked before it runs.
+// It can only add caution: a concern forces an approval prompt; it never approves what the guard blocks.
+function readReviewControl() {
+  try { return JSON.parse(fs.readFileSync(process.env.HARNESS_REMOTE_CONTROL, 'utf8')); } catch { return null; }
+}
+
+function reviewContext(ctx) {
+  const textOf = (m) => (typeof m.content === 'string' ? m.content : (m.content || []).filter((c) => c && c.type === 'text').map((c) => c.text).join('\n'));
+  try {
+    const msgs = ctx.sessionManager.getBranch().filter((e) => e && e.type === 'message' && e.message).map((e) => e.message);
+    const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+    const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant' && textOf(m).trim());
+    return { request: lastUser ? textOf(lastUser).slice(-2000) : '', intent: lastAssistant ? textOf(lastAssistant).slice(-800) : '' };
+  } catch {
+    return { request: '', intent: '' };
+  }
+}
+
+async function reviewToolCall(control, ctx, toolName, callText) {
+  const { request, intent } = reviewContext(ctx);
+  const shell = process.platform === 'win32' ? (toolName === 'powershell' ? 'Windows PowerShell' : 'Git Bash on Windows') : 'bash';
+  const system = 'You review tool calls from a coding agent BEFORE they run on the user\'s own computer. Look for real mistakes: ' +
+    'paths that do not match what the user asked for; deleting, moving or overwriting more than intended; shell pitfalls ' +
+    '(PowerShell automatic variables such as $home, $input, $args, $host, $error that cannot or should not be assigned; ' +
+    'variables that may be empty; missing quotes around paths with spaces; scripts that keep going after an error before a destructive step); ' +
+    'installing or uninstalling the wrong thing; changes outside the project folder that the user did not ask for. ' +
+    'Ignore style. Reply with ONLY a JSON object: {"verdict":"ok"|"concern","reason":"one short sentence"}. ' +
+    'Use "concern" only for problems that could cause damage or clearly do the wrong thing.';
+  const user = `User's request:\n${request || '(unknown)'}\n\nWhat the agent said it is doing:\n${intent || '(nothing)'}\n\n` +
+    `Working folder: ${ctx.cwd || process.cwd()}\nShell: ${shell}\nTool: ${toolName}\n\nTool call:\n${callText.slice(0, 6000)}`;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 120000);
+  try {
+    const res = await fetch(String(control.url).replace(/\/$/, '') + '/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (control.key || 'local') },
+      body: JSON.stringify({ model: control.model, temperature: 0, max_tokens: 2000, stream: false, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      signal: abort.signal,
+    });
+    if (!res.ok) return { verdict: 'error', reason: 'Reviewer request failed (HTTP ' + res.status + ')' };
+    const j = await res.json();
+    const text = String((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '')
+      .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^[\s\S]*<\/think>/i, '');
+    const m = text.match(/\{[^{}]*"verdict"[^{}]*\}/);
+    if (!m) return { verdict: 'error', reason: 'Reviewer gave no verdict' };
+    const v = JSON.parse(m[0]);
+    return { verdict: v.verdict === 'concern' ? 'concern' : 'ok', reason: String(v.reason || '').trim().slice(0, 400) };
+  } catch (e) {
+    return { verdict: 'error', reason: 'Reviewer unavailable: ' + (e && e.name === 'AbortError' ? 'timed out' : (e && e.message) || e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function piGuardMain(pi) {
   const READ_ONLY = new Set(['read', 'grep', 'find', 'ls']);
   const always = new Set();
@@ -739,45 +793,69 @@ function piGuardMain(pi) {
     const cwd = ctx.cwd || process.cwd();
     const asking = process.env.HARNESS_REMOTE_PERMISSIONS === 'ask';
     const shell = typeof input.command === 'string';
+
+    let review = null;
+    const runReview = async (callText) => {
+      const control = readReviewControl();
+      if (!control || !control.review || !control.url || !control.model) return null;
+      ctx.ui.notify('[review:start] ' + name, 'info');
+      const r = await reviewToolCall(control, ctx, name, callText);
+      ctx.ui.notify('[review:' + r.verdict + '] ' + r.reason, r.verdict === 'concern' ? 'warning' : 'info');
+      return r;
+    };
+    const reviewLine = () => (review && review.verdict !== 'error' ? '\n\nReviewer: ' + (review.verdict === 'concern' ? '⚠ ' : 'OK. ') + review.reason : '');
+    const concernPrompt = async (what) => {
+      const choice = await ctx.ui.select('⚠ The reviewer has a concern\n' + review.reason + '\n\n' + what, ['No', 'Yes, run it anyway']);
+      if (choice === 'Yes, run it anyway') return undefined;
+      return { block: true, reason: 'The user declined after the reviewer raised a concern: ' + review.reason };
+    };
+
     if (shell) {
       const a = analyzeCommand(input.command, cwd, os.homedir(), process.platform, process.env);
       if (a.block) {
         ctx.ui.notify('Blocked a command: ' + a.block, 'warning');
         return { block: true, reason: 'Harness Remote blocked this command because ' + a.block + '. Do not retry or work around this. Tell the user exactly what you wanted to delete and why, and let them do it themselves.' };
       }
+      const heads = writeCommandHeads(input.command);
+      if (a.destructive || heads.length) review = await runReview(input.command);
       if (a.destructive) {
-        const detail = (a.targets.length ? 'Deletes:\n' + a.targets.map((t) => '  ' + t).join('\n') + '\n\n' : '') + 'Command:\n' + input.command;
+        const detail = (a.targets.length ? 'Deletes:\n' + a.targets.map((t) => '  ' + t).join('\n') + '\n\n' : '') + 'Command:\n' + input.command + reviewLine();
         const choice = await ctx.ui.select('⚠ ' + a.warn + '\n' + detail, ['No', 'Yes, run it']);
         if (choice === 'Yes, run it') return undefined;
         return { block: true, reason: 'The user declined this destructive command from their phone.' };
       }
-      const heads = writeCommandHeads(input.command);
       if (!heads.length) return undefined;                 // read-only: searching, listing, status, reading
+      if (review && review.verdict === 'concern') return concernPrompt('Command:\n' + input.command);
       if (!asking) return undefined;                       // auto mode runs non-delete commands
       if (allowAllWrites || heads.every((h) => allowedHeads.has(h))) return undefined;
       const optHead = 'Allow ' + heads[0] + ' commands this session';
       const optAll = 'Allow all non-delete commands this session';
-      const choice = await ctx.ui.select('Run this command?\n' + input.command, ['Yes', optHead, optAll, 'No']);
+      const choice = await ctx.ui.select('Run this command?\n' + input.command + reviewLine(), ['Yes', optHead, optAll, 'No']);
       if (choice === optAll) { allowAllWrites = true; return undefined; }
       if (choice === optHead) { heads.forEach((h) => allowedHeads.add(h)); return undefined; }
       if (choice === 'Yes') return undefined;
       return { block: true, reason: 'The user declined this command from their phone.' };
     }
+    if (READ_ONLY.has(name)) return undefined;
+    const tool = pi.getAllTools().find((t) => t.name === name);
+    if (tool && tool.annotations && tool.annotations.readOnlyHint === true) return undefined;
+    const callText = (name === 'write' || name === 'edit') && typeof input.path === 'string'
+      ? input.path + '\n' + String(input.content || input.newText || input.new_text || JSON.stringify(input)).slice(0, 4000)
+      : describeToolCall(name, input);
+    review = await runReview(callText);
     if ((name === 'write' || name === 'edit') && typeof input.path === 'string') {
       const target = path.resolve(cwd, input.path);
       const rel = path.relative(cwd, target);
       if (rel.startsWith('..') || path.isAbsolute(rel)) {
-        const choice = await ctx.ui.select('⚠ Change a file outside the project folder?\n' + target, ['No', 'Yes']);
+        const choice = await ctx.ui.select('⚠ Change a file outside the project folder?\n' + target + reviewLine(), ['No', 'Yes']);
         if (choice === 'Yes') return undefined;
         return { block: true, reason: 'The user declined a change outside the project folder.' };
       }
     }
-    if (!asking || READ_ONLY.has(name)) return undefined;
-    const tool = pi.getAllTools().find((t) => t.name === name);
-    if (tool && tool.annotations && tool.annotations.readOnlyHint === true) return undefined;
-    if (always.has(name)) return undefined;
+    if (review && review.verdict === 'concern') return concernPrompt(describeToolCall(name, input));
+    if (!asking || always.has(name)) return undefined;
     const yesAll = "Yes, and don't ask again for " + name + ' this session';
-    const choice = await ctx.ui.select('Allow ' + name + '?\n' + describeToolCall(name, input), ['Yes', yesAll, 'No']);
+    const choice = await ctx.ui.select('Allow ' + name + '?\n' + describeToolCall(name, input) + reviewLine(), ['Yes', yesAll, 'No']);
     if (choice === yesAll) always.add(name);
     if (choice === 'Yes' || choice === yesAll) return undefined;
     return { block: true, reason: 'The user declined this ' + name + ' call from their phone.' };
@@ -789,9 +867,13 @@ const PI_PERMISSION_EXTENSION = [
   '// Written by Harness Bridge. Guards destructive commands and asks the Harness Remote app before pi changes things.',
   "import path from 'node:path';",
   "import os from 'node:os';",
+  "import fs from 'node:fs';",
   analyzeCommand.toString(),
   writeCommandHeads.toString(),
   describeToolCall.toString(),
+  readReviewControl.toString(),
+  reviewContext.toString(),
+  reviewToolCall.toString(),
   'export default ' + piGuardMain.toString(),
   '',
 ].join('\n\n');
@@ -897,7 +979,12 @@ function piRecordHandler(s, p) {
         if (o.aborted) pushEvent(s, { kind: 'status', text: 'Interrupted' });
         p.asks.clear();
         setState(s, 'idle');
-        if (p.restartWhenIdle) quietKill(p);
+        if (p.afterAbort) {
+          const next = p.afterAbort;
+          p.afterAbort = null;
+          rpcWrite(p, { type: 'prompt', ...next });
+          setState(s, 'running');
+        } else if (p.restartWhenIdle) quietKill(p);
         return;
       case 'message_update': {
         const e = o.assistantMessageEvent || {};
@@ -933,7 +1020,7 @@ function piRecordHandler(s, p) {
         return;
       }
       case 'tool_execution_start':
-        if (!o.parentToolCallId) setActivity('running', `Running ${o.toolName}`);
+        if (!o.parentToolCallId) { p.lastTool = o.toolName; setActivity('running', `Running ${o.toolName}`); }
         streamFlush();
         pushEvent(s, { kind: 'tool', toolId: o.toolCallId, tool: o.toolName, text: toolSummary(o.args), parent: o.parentToolCallId || undefined });
         return;
@@ -967,7 +1054,13 @@ function piRecordHandler(s, p) {
           });
           setState(s, 'waiting');
         } else if (o.method === 'notify' && o.message) {
-          pushEvent(s, { kind: 'status', text: o.message });
+          const rv = /^\[review:(start|ok|concern|error)\]\s*([\s\S]*)$/.exec(o.message);
+          if (!rv) pushEvent(s, { kind: 'status', text: o.message });
+          else if (rv[1] === 'start') setActivity('reviewing', `Reviewer checking ${rv[2]}`);
+          else {
+            pushEvent(s, { kind: 'review', verdict: rv[1], text: rv[2] });
+            setActivity('running', `Running ${p.lastTool || 'tool'}`);
+          }
         }
         return;
       case 'extension_error':
@@ -1014,7 +1107,7 @@ function scheduleSave() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, thinking, permissions, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, thinking, permissions, createdAt, updatedAt, turns, state, seq, events }));
+    const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, thinking, permissions, review, reviewModel, reviewProvider, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, thinking, permissions, review, reviewModel, reviewProvider, createdAt, updatedAt, turns, state, seq, events }));
     try { saveJson(sessionsPath, data, 0o600); } catch (e) { console.error('save failed:', e.message); }
   }, 1000);
 }
@@ -1022,7 +1115,7 @@ function scheduleSave() {
 function summary(s) {
   const last = [...s.events].reverse().find((e) => ['user', 'out', 'text', 'ask', 'tool'].includes(e.kind));
   return {
-    id: s.id, title: s.title, harness: s.harness, cwd: s.cwd, model: s.model, provider: s.provider || '', thinking: s.thinking || '', permissions: s.permissions || 'ask', runningSince: s.runningSince || 0,
+    id: s.id, title: s.title, harness: s.harness, cwd: s.cwd, model: s.model, provider: s.provider || '', thinking: s.thinking || '', permissions: s.permissions || 'ask', review: !!s.review, reviewModel: s.reviewModel || '', runningSince: s.runningSince || 0,
     createdAt: s.createdAt, updatedAt: s.updatedAt, turns: s.turns, state: s.state, seq: s.seq,
     preview: last ? stripAnsi(last.text || '').trim().slice(-160) : '',
   };
@@ -1052,7 +1145,7 @@ function setState(s, state) {
   scheduleSave();
 }
 
-function createSession({ harness, cwd, model, provider, title, permissions }) {
+function createSession({ harness, cwd, model, provider, title, permissions, review }) {
   const h = harnessList().find((x) => x.id === harness);
   if (!h) throw new Error(`Unknown harness: ${harness}`);
   const reason = unavailableReason(h);
@@ -1065,7 +1158,7 @@ function createSession({ harness, cwd, model, provider, title, permissions }) {
   const id = crypto.randomBytes(6).toString('hex');
   const now = Date.now();
   const s = {
-    id, harness: h.id, cwd: dir, model: model || '', provider: backend, permissions: permissions === 'auto' ? 'auto' : 'ask', turns: 0, state: 'idle', seq: 0, events: [],
+    id, harness: h.id, cwd: dir, model: model || '', provider: backend, permissions: permissions === 'auto' ? 'auto' : 'ask', review: review !== false && h.mode === 'rpc', reviewModel: '', reviewProvider: '', turns: 0, state: 'idle', seq: 0, events: [],
     title: (title || '').trim() || `${h.name || h.id} · ${path.basename(dir)}`,
     createdAt: now, updatedAt: now,
   };
@@ -1109,7 +1202,11 @@ function startProcess(s, harness, prompt) {
   const interactive = h.mode === 'interactive';
   const stdinMode = h.stdin || (interactive || rpc || h.pty ? 'pipe' : 'ignore');
   const env = buildEnv(h, vars);
-  if (rpc) env.HARNESS_REMOTE_PERMISSIONS = s.permissions === 'auto' ? 'auto' : 'ask';
+  if (rpc) {
+    env.HARNESS_REMOTE_PERMISSIONS = s.permissions === 'auto' ? 'auto' : 'ask';
+    env.HARNESS_REMOTE_CONTROL = controlPath(s);
+    writeControl(s);
+  }
   if (h.pty) env.TERM = env.TERM && env.TERM !== 'dumb' ? env.TERM : 'xterm-256color';
 
   let child;
@@ -1192,7 +1289,10 @@ function startProcess(s, harness, prompt) {
     const text = failure ? `Failed to start ${h.command}: ${failure}` : p.stopped || signal ? 'Stopped' : `Exited with code ${code}`;
     if (!p.quiet) pushEvent(s, { kind: 'exit', code: failure ? -1 : code ?? null, text });
     setState(s, interactive ? 'exited' : 'idle');
-    if (!interactive && !rpc && s.queue && s.queue.length && !p.stopped && sessions.has(s.id)) {
+    if (p.restartWith != null && sessions.has(s.id)) {
+      const next = p.restartWith;
+      setImmediate(() => { if (!procs.get(s.id) && startProcess(s, harness, next)) s.turns++; });
+    } else if (!interactive && !rpc && s.queue && s.queue.length && !p.stopped && sessions.has(s.id)) {
       const next = s.queue.shift();
       setImmediate(() => { if (!procs.get(s.id) && startProcess(s, harness, next)) s.turns++; });
     }
@@ -1217,7 +1317,7 @@ function saveUploads(s, images) {
   });
 }
 
-function sendToSession(s, text, images = [], thumbs = []) {
+function sendToSession(s, text, images = [], thumbs = [], interrupt = false) {
   const h = harnessList().find((x) => x.id === s.harness);
   if (!h) throw new Error(`Harness ${s.harness} is no longer configured`);
   const running = procs.get(s.id);
@@ -1227,9 +1327,19 @@ function sendToSession(s, text, images = [], thumbs = []) {
     const p = running || startProcess(s, h, null);
     if (!p) return;
     const busy = s.state === 'running' || s.state === 'waiting';
-    pushEvent(s, userEvent(busy ? { steer: true } : {}));
     const message = text || (images.length ? 'See the attached image.' : '');
     const imgs = images.length ? { images: images.map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType })) } : {};
+    if (interrupt && busy && running) {
+      // Stop the current step now (open questions are cancelled so the guard returns) and send right after.
+      pushEvent(s, userEvent({ interrupt: true }));
+      for (const askId of (p.asks ? [...p.asks.keys()] : [])) rpcWrite(p, { type: 'extension_ui_response', id: askId, cancelled: true });
+      if (p.asks) p.asks.clear();
+      p.afterAbort = { message, ...imgs };
+      rpcWrite(p, { type: 'abort' });
+      s.turns++;
+      return;
+    }
+    pushEvent(s, userEvent(busy ? { steer: true } : {}));
     rpcWrite(p, busy ? { type: 'prompt', message, streamingBehavior: 'steer', ...imgs } : { type: 'prompt', message, ...imgs });
     if (!busy) setState(s, 'running');
     s.turns++;
@@ -1240,12 +1350,23 @@ function sendToSession(s, text, images = [], thumbs = []) {
     text = `${text}${text ? '\n\n' : ''}${files.map((f) => `Attached image: ${f}`).join('\n')}`;
   }
   if (h.mode === 'interactive') {
-    pushEvent(s, userEvent({}));
+    pushEvent(s, userEvent(interrupt && running ? { interrupt: true } : {}));
     let p = running;
     if (!p) p = startProcess(s, h, null);
     if (!p) return;
+    if (interrupt && running && h.pty) p.child.stdin.write('\u0003');
     p.child.stdin.write(text + (h.pty ? '\r' : '\n'));
     s.turns++;
+    return;
+  }
+  if (running && interrupt) {
+    pushEvent(s, userEvent({ interrupt: true }));
+    running.restartWith = text;
+    running.stopped = true;
+    try {
+      if (IS_WIN) spawn('taskkill', ['/pid', String(running.child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => running.child.kill());
+      else process.kill(-running.child.pid, 'SIGINT');
+    } catch { try { running.child.kill(); } catch {} }
     return;
   }
   if (running) {
@@ -1262,6 +1383,29 @@ function sendToSession(s, text, images = [], thumbs = []) {
   }
   pushEvent(s, userEvent({}));
   if (startProcess(s, h, text)) s.turns++;
+}
+
+function controlPath(s) {
+  return path.join(path.dirname(configPath), `control-${s.id}.json`);
+}
+
+// The pi extension re-reads this before every review, so toggling the reviewer applies immediately.
+function writeControl(s) {
+  const provider = s.reviewProvider || s.provider;
+  const base = provider === OLLAMA ? config.ollama : config.lmstudio;
+  const data = { review: !!s.review, url: `${base}/v1`, model: s.reviewModel || s.model, key: provider === OLLAMA ? 'ollama' : 'lm-studio' };
+  try { saveJson(controlPath(s), data, 0o600); } catch (e) { console.error('control file:', e.message); }
+}
+
+function setReview(s, enabled, model, provider) {
+  s.review = !!enabled;
+  if (model !== undefined) {
+    s.reviewModel = model ? String(model) : '';
+    s.reviewProvider = model ? String(provider || s.provider || '') : '';
+  }
+  writeControl(s);
+  pushEvent(s, { kind: 'status', text: s.review ? `Reviewer on (${s.reviewModel || s.model || 'session model'})` : 'Reviewer off' });
+  broadcastSessions();
 }
 
 function quietKill(p) {
@@ -1288,6 +1432,7 @@ function setModel(s, model, provider) {
     else quietKill(p);
   }
   pushEvent(s, { kind: 'status', text: `Model: ${s.model}${via}` });
+  writeControl(s);
   broadcastSessions();
 }
 
@@ -1334,6 +1479,7 @@ function stopSession(s, signal = 'SIGINT') {
 
 function deleteSession(s) {
   stopSession(s, 'SIGTERM');
+  try { fs.unlinkSync(controlPath(s)); } catch {}
   sessions.delete(s.id);
   broadcastSessions();
   scheduleSave();
@@ -1509,10 +1655,11 @@ async function handle(c, raw) {
         const thumbs = (Array.isArray(msg.thumbs) ? msg.thumbs : []).slice(0, MAX_IMAGES).filter((t) => typeof t === 'string' && t.length < 40000);
         if (!text.trim() && !images.length) throw new Error('Empty message');
         if (Buffer.byteLength(text) > MAX_PROMPT) throw new Error('Message is too long (100 KB max)');
-        sendToSession(need(msg.id), text, images, thumbs);
+        sendToSession(need(msg.id), text, images, thumbs, msg.interrupt === true);
         return reply({ t: 'ok' });
       }
       case 'set-model': setModel(need(msg.id), msg.model, msg.provider); return reply({ t: 'ok' });
+      case 'set-review': setReview(need(msg.id), msg.enabled !== false, msg.model, msg.provider); return reply({ t: 'ok' });
       case 'set-effort': setEffort(need(msg.id), String(msg.level)); return reply({ t: 'ok' });
       case 'stdin': writeRaw(need(msg.id), String(msg.data ?? '')); return reply({ t: 'ok' });
       case 'answer': answerAsk(need(msg.id), String(msg.askId), msg); return reply({ t: 'ok' });
@@ -1669,7 +1816,7 @@ function shutdown() {
   for (const s of sessions.values()) stopSession(s, 'SIGTERM');
   clearTimeout(saveTimer);
   saveTimer = null;
-  const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, thinking, permissions, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, thinking, permissions, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
+  const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, thinking, permissions, review, reviewModel, reviewProvider, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, thinking, permissions, review, reviewModel, reviewProvider, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
   try { saveJson(sessionsPath, data, 0o600); } catch {}
   process.exit(0);
 }

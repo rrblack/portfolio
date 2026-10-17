@@ -218,10 +218,11 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
 
     suspend fun listDir(path: String?): DirListing = parseListing(request("ls") { if (path != null) put("path", path) })
 
-    suspend fun create(harness: String, cwd: String, model: String, provider: String, title: String, askPermission: Boolean = true): SessionSummary {
+    suspend fun create(harness: String, cwd: String, model: String, provider: String, title: String, askPermission: Boolean = true, review: Boolean = true): SessionSummary {
         val r = request("create") {
             put("harness", harness); put("cwd", cwd); put("model", model); put("provider", provider); put("title", title)
             put("permissions", if (askPermission) "ask" else "auto")
+            put("review", review)
         }
         val s = parseSession(r.getJSONObject("session"))
         subscribed.add(s.id)
@@ -229,9 +230,10 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
         return s
     }
 
-    suspend fun send(id: String, text: String, photos: List<Photo> = emptyList()) {
+    suspend fun send(id: String, text: String, photos: List<Photo> = emptyList(), interrupt: Boolean = false) {
         request("send") {
             put("id", id); put("text", text)
+            if (interrupt) put("interrupt", true)
             if (photos.isNotEmpty()) {
                 put("images", JSONArray(photos.map { JSONObject().put("data", it.data).put("mimeType", it.mimeType) }))
                 put("thumbs", JSONArray(photos.map { it.thumb }))
@@ -241,6 +243,13 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
 
     suspend fun setModel(id: String, model: String, provider: String) {
         request("set-model") { put("id", id); put("model", model); put("provider", provider) }
+    }
+
+    suspend fun setReview(id: String, enabled: Boolean, model: String? = null, provider: String? = null) {
+        request("set-review") {
+            put("id", id); put("enabled", enabled)
+            if (model != null) { put("model", model); put("provider", provider ?: "") }
+        }
     }
 
     suspend fun setEffort(id: String, level: String) { request("set-effort") { put("id", id); put("level", level) } }

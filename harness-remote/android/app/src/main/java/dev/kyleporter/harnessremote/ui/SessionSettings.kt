@@ -10,6 +10,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -33,6 +37,9 @@ fun SessionSettingsDialog(
     client: BridgeClient,
     harnessModels: List<String>,
     showEffort: Boolean,
+    showReviewer: Boolean,
+    reviewOn: Boolean,
+    reviewModel: String,
     currentModel: String,
     currentProvider: String,
     currentEffort: String,
@@ -40,6 +47,7 @@ fun SessionSettingsDialog(
     onDismiss: () -> Unit,
     onModel: (model: String, provider: String) -> Unit,
     onEffort: (level: String) -> Unit,
+    onReview: (enabled: Boolean, model: String?, provider: String?) -> Unit,
 ) {
     var catalog by remember { mutableStateOf<ModelCatalog?>(null) }
     var failed by remember { mutableStateOf<String?>(null) }
@@ -70,6 +78,38 @@ fun SessionSettingsDialog(
                         }
                     }
                     Text("How much the model thinks before answering. Applies right away.", color = Gray, fontSize = 11.sp)
+                }
+                if (showReviewer) {
+                    Text("REVIEWER", color = Red, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Check each command and file change before it runs",
+                            color = OffWhite, fontSize = 13.sp, modifier = Modifier.weight(1f),
+                        )
+                        Switch(
+                            checked = reviewOn, onCheckedChange = { onReview(it, null, null) },
+                            colors = SwitchDefaults.colors(checkedTrackColor = Red, checkedThumbColor = OffWhite),
+                        )
+                    }
+                    if (reviewOn) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(
+                                selected = reviewModel.isBlank(),
+                                onClick = { onReview(true, "", null) },
+                                label = { Text("Same as session", fontSize = 12.sp) },
+                                colors = chipColors,
+                            )
+                            catalog?.models?.filter { it.provider in harnessModels }?.forEach { m ->
+                                FilterChip(
+                                    selected = m.name == reviewModel,
+                                    onClick = { onReview(true, m.name, m.provider) },
+                                    label = { Text(m.name, fontSize = 12.sp) },
+                                    colors = chipColors,
+                                )
+                            }
+                        }
+                        Text("A smaller, faster model works well as the reviewer.", color = Gray, fontSize = 11.sp)
+                    }
                 }
                 if (harnessModels.isNotEmpty()) {
                     Text("MODEL", color = Red, fontSize = 11.sp, fontWeight = FontWeight.Bold)

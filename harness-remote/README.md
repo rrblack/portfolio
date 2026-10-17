@@ -109,6 +109,14 @@ Presets whose command isn't installed show up greyed out in the app, with the re
   - a live "✻ Running Bash… (12s)" line
 
   Sending a message while pi works **steers** it: pi reads it after the current step. Stop aborts cleanly.
+- **⚡ Send now:** while an agent is working, the ⚡ button next to Send stops the current step and delivers your message straight away, instead of waiting for the step to finish. Use it to steer the agent before it goes further down the wrong path. Pi aborts the step, then receives your message as the next prompt, with the conversation kept. Turn-mode harnesses are stopped and rerun with the new message. In a terminal session, Ctrl-C is sent before the text. Any open approval card is cancelled.
+- **Reviewer (pi):** a second look at every command and file change before it runs. The bridge sends the proposed tool call to a model on your LM Studio or Ollama server, together with your last message and what the agent said it was about to do. The reviewer answers *ok* or *concern* with a one-line reason.
+  - The verdict shows under the tool row in the chat: ✓ green for ok, ⚠ red for a concern.
+  - A concern always stops and asks you (**No / Yes, run it anyway**), even if you chose "Allow all" for the session or turned asking off.
+  - The reviewer can only add caution. An *ok* never skips a card you would otherwise get, and the delete guard still applies.
+  - If the reviewer can't be reached or doesn't answer in 120 s, the call goes through the normal rules and the chat notes that the review failed.
+  - It's on by default for new pi sessions. Turn it off, or pick a different reviewer model (a smaller, faster one works well), under session settings → Reviewer. Changes apply to the next tool call without restarting pi.
+  - Read-only commands aren't reviewed.
 - **The status line always says what pi is doing:** waiting for the model (with a hint after 20 s that LM Studio may still be loading or reading the prompt), thinking, writing, *preparing a tool call*, running a tool, retrying or compacting. It shows a rough token count and the elapsed time. While the model writes a tool call, its arguments (the command or file contents) stream in under the tool row.
 - **Approvals appear in a panel fixed above the message box,** not inside the scrolling chat. Its buttons ignore taps until the panel has been visible for about half a second, and again while the chat is scrolling, so a scroll can't turn into an accidental Yes or No. In the transcript each question is one line: pending, ✓ allowed, ✗ declined or expired.
 - **In a chat:** replies render as markdown. Tap the model line under the title to switch **model** (the conversation carries over: the bridge restarts pi on the new model if pi didn't load it at startup) or **effort** (pi's thinking level, applied right away). **+** attaches up to 4 photos. They're resized on the phone and sent as image input to pi. Pick a model LM Studio marks as *vision*; the bridge sets `"input": ["text","image"]` for it in pi's `models.json`. Other harnesses get photos saved to a temp folder, with the paths added to the prompt.
@@ -216,12 +224,12 @@ JSON over a WebSocket at `/ws` (`Authorization: Bearer <token>`). Requests carry
 | `models` | `{t:"models", lmstudio[], ollama[], errors{}, lms}` |
 | `lms-start` | runs `lms server start`, then replies like `models` |
 | `ls {path}` | `{t:"ls", path, parent, dirs[], git}` |
-| `create {harness, cwd, model, provider, title, permissions: "ask"\|"auto"}` | `{t:"created", session}` |
+| `create {harness, cwd, model, provider, title, permissions: "ask"\|"auto", review}` | `{t:"created", session}` |
 | `subscribe {id, after}` | `{t:"history", events[]}`, then live `{t:"event", id, ev}` |
-| `send {id, text}` · `stdin {id, data}` · `stop {id}` · `restart {id}` · `rename {id, title}` · `delete {id}` | `{t:"ok"}` or `{t:"error", error}` |
+| `send {id, text, images?, interrupt?}` · `set-model {id, model, provider}` · `set-effort {id, level}` · `set-review {id, enabled, model?, provider?}` · `stdin {id, data}` · `stop {id}` · `restart {id}` · `rename {id, title}` · `delete {id}` | `{t:"ok"}` or `{t:"error", error}` |
 | `answer {id, askId, value \| confirmed \| cancelled}` | answers a permission or question card (`ask` event) |
 
-Event kinds: `user`, `out`, `err`, `status`, `exit`, plus, for RPC harnesses, `think`, `text`, `tool {toolId, tool}`, `toolres {toolId, isError, durationMs}`, `ask {askId, method, options}` and `answer {askId}`.
+Event kinds: `user`, `out`, `err`, `status`, `exit`, plus, for RPC harnesses, `think`, `text`, `tool {toolId, tool}`, `toolres {toolId, isError, durationMs}`, `ask {askId, method, options}`, `answer {askId}` and `review {verdict: "ok"|"concern"|"error"}`. A `user` event sent with ⚡ has `interrupt: true`. `{t:"activity", id, activity}` reports what the agent is doing right now.
 
 The bridge also pushes `{t:"sessions", sessions[]}` whenever any session changes state (`idle` / `running` / `waiting` / `exited`). HTTP: `GET /health`, `POST /pair {code}`.
 
