@@ -28,7 +28,11 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -75,6 +79,8 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
     var askPermission by remember { mutableStateOf(true) }
     var review by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    var folderError by remember { mutableStateOf<String?>(null) }
+    var typedPath by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
     val recent = remember { hub.recentFolders(client.server.id) }
@@ -82,8 +88,8 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
     fun browse(path: String?, fallback: Boolean = false) {
         scope.launch {
             runCatching { client.listDir(path) }
-                .onSuccess { listing = it; error = null }
-                .onFailure { if (fallback) browse(null) else error = it.message }
+                .onSuccess { listing = it; folderError = null; typedPath = "" }
+                .onFailure { if (fallback) browse(null) else folderError = it.message }
         }
     }
 
@@ -258,8 +264,34 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                         )
                     }
                 }
+                if (l.drives.isNotEmpty()) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        l.drives.forEach { d ->
+                            FilterChip(
+                                selected = l.path.startsWith(d, ignoreCase = true),
+                                onClick = { browse(d) },
+                                label = { Text(d.trimEnd('\\', '/'), fontSize = 12.sp, fontFamily = Mono) },
+                                colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Red.copy(alpha = 0.25f)),
+                            )
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = typedPath,
+                    onValueChange = { typedPath = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = LocalTextStyle.current.copy(fontFamily = Mono, fontSize = 13.sp),
+                    placeholder = { Text("Or type a path, e.g. C:\\Program Files", fontSize = 13.sp, color = Gray) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { if (typedPath.isNotBlank()) browse(typedPath) }),
+                    trailingIcon = {
+                        if (typedPath.isNotBlank()) IconButton(onClick = { browse(typedPath) }) { Icon(Icons.Filled.Check, "Open this path", tint = Red) }
+                    },
+                )
+                folderError?.let { Text(it, color = Red, fontSize = 12.sp) }
                 Text(
-                    "Selected: ${baseName(l.path)}${if (l.git) "  (git repo)" else ""} · tap a folder below to open it",
+                    "Selected: ${l.path}${if (l.git) "  (git repo)" else ""} · tap a folder below to open it",
                     color = Gray, fontSize = 11.sp,
                 )
                 Column(
@@ -272,7 +304,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     l.dirs.forEach { d -> DirRow("$d/") { browse(childPath(l.path, d)) } }
                     if (l.dirs.isEmpty()) Text("No subfolders", Modifier.padding(12.dp), color = Gray, fontSize = 13.sp)
                 }
-            } ?: Text("Loading…", color = Gray)
+            } ?: Text(folderError ?: "Loading…", color = if (folderError != null) Red else Gray)
 
             Section("Title (optional)")
             OutlinedTextField(value = title, onValueChange = { title = it }, singleLine = true, modifier = Modifier.fillMaxWidth())

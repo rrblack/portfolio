@@ -124,7 +124,7 @@ fun providerLabel(provider: String): String = when (provider) {
     else -> provider
 }
 
-data class DirListing(val path: String, val parent: String?, val dirs: List<String>, val git: Boolean)
+data class DirListing(val path: String, val parent: String?, val dirs: List<String>, val git: Boolean, val drives: List<String> = emptyList())
 
 fun baseName(path: String): String =
     path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\').ifBlank { path }
@@ -236,4 +236,5 @@ fun parseListing(o: JSONObject) = DirListing(
     parent = o.strOrNull("parent"),
     dirs = o.optJSONArray("dirs").strings(),
     git = o.optBoolean("git"),
+    drives = o.optJSONArray("drives").strings(),
 )

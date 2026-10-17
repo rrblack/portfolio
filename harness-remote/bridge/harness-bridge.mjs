@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.9.0';
+const VERSION = '0.9.1';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -75,7 +75,13 @@ if (!config.token || argv.includes('--rotate-token')) {
 }
 if (config.port == null) config.port = 8787;
 if (config.host == null) config.host = '0.0.0.0';
-if (config.roots == null) config.roots = [os.homedir()];
+// Older versions wrote the home folder here by default, which hid C:\, Program Files and other drives
+// from the folder picker. That default is now the whole computer; a list the user chose is kept.
+if (config.roots == null || (Array.isArray(config.roots) && config.roots.length === 1 && config.roots[0] === os.homedir() && !config.rootsChosen)) {
+  if (config.roots != null) console.log('Folder picker: now opens the whole computer instead of only your user folder. Set "roots" in config.json (and "rootsChosen": true) to limit it.');
+  config.roots = 'all';
+  configDirty = true;
+}
 if (config.ollama == null) config.ollama = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
 if (config.lmstudio == null) config.lmstudio = 'http://127.0.0.1:1234';
 if (config.harnesses == null) config.harnesses = [];
@@ -351,8 +357,19 @@ function wrapPty(cmd, args) {
 const realpath = (p) => (IS_WIN ? fs.realpathSync.native(p) : fs.realpathSync(p));
 const samePath = (p) => (IS_WIN ? p.toLowerCase() : p);
 
+function allRoots() {
+  if (!IS_WIN) return ['/'];
+  const drives = [];
+  for (let c = 65; c <= 90; c++) {
+    const d = `${String.fromCharCode(c)}:\\`;
+    if (safeIsDir(d)) drives.push(d);
+  }
+  return drives;
+}
+
 function realRoots() {
-  return config.roots.map((r) => { try { return realpath(r.replace(/^~(?=$|[\\/])/, os.homedir())); } catch { return null; } }).filter(Boolean);
+  if (config.roots === 'all' || (Array.isArray(config.roots) && config.roots.includes('*'))) return allRoots();
+  return (Array.isArray(config.roots) ? config.roots : [config.roots]).map((r) => { try { return realpath(r.replace(/^~(?=$|[\\/])/, os.homedir())); } catch { return null; } }).filter(Boolean);
 }
 
 function insideRoots(p) {
@@ -366,16 +383,27 @@ function insideRoots(p) {
 }
 
 function listDir(p) {
-  const dir = insideRoots(p || realRoots()[0] || os.homedir());
-  if (!dir) throw new Error('Path is outside the allowed roots');
-  const entries = fs.readdirSync(dir, { withFileTypes: true })
-    .filter((e) => !e.name.startsWith('.'))
+  const want = String(p || '').trim().replace(/^"(.*)"$/, '$1').replace(/^~(?=$|[\\/])/, os.homedir());
+  const target = want ? path.resolve(IS_WIN && /^[a-z]:$/i.test(want) ? `${want}\\` : want) : insideRoots(os.homedir()) || realRoots()[0] || os.homedir();
+  if (!safeIsDir(target)) throw new Error(fs.existsSync(target) ? `${target} is not a folder` : `There is no folder ${target} on this computer`);
+  const dir = insideRoots(target);
+  if (!dir) throw new Error(`${target} is outside the folders this bridge allows ("roots" in ${configPath})`);
+  let list;
+  try {
+    list = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    if (e.code === 'EACCES' || e.code === 'EPERM') throw new Error(`${IS_WIN ? 'Windows' : 'The system'} won't let the bridge open ${dir} (access denied)`);
+    throw e;
+  }
+  const entries = list
+    .filter((e) => !e.name.startsWith('.') && !(IS_WIN && (e.name.startsWith('$') || e.name === 'System Volume Information')))
     .filter((e) => e.isDirectory() || (e.isSymbolicLink() && safeIsDir(path.join(dir, e.name))))
     .map((e) => e.name)
     .sort((a, b) => a.localeCompare(b))
     .slice(0, 500);
   const isRoot = realRoots().some((r) => samePath(r) === samePath(dir));
-  return { path: dir, parent: isRoot ? null : path.dirname(dir), dirs: entries, git: fs.existsSync(path.join(dir, '.git')) };
+  const roots = realRoots();
+  return { path: dir, parent: isRoot ? null : path.dirname(dir), dirs: entries, git: fs.existsSync(path.join(dir, '.git')), drives: roots.length > 1 ? roots : [] };
 }
 
 function safeIsDir(p) {
@@ -1156,7 +1184,7 @@ function createSession({ harness, cwd, model, provider, title, permissions, revi
   const providers = providersOf(h);
   const backend = providers.includes(provider) ? provider : providers[0] || '';
   const dir = insideRoots(cwd || realRoots()[0] || os.homedir());
-  if (!dir || !safeIsDir(dir)) throw new Error('Working directory is missing or outside the allowed roots');
+  if (!dir || !safeIsDir(dir)) throw new Error(`${cwd} is missing or outside the folders this bridge allows ("roots" in ${configPath})`);
   const id = crypto.randomBytes(6).toString('hex');
   const now = Date.now();
   const s = {
@@ -1937,7 +1965,7 @@ server.listen(port, host, () => {
   const harnesses = harnessList().map(publicHarness);
   console.log(`\nHarness Bridge ${VERSION} listening on ${scheme}://${host}:${port}`);
   console.log(`Config: ${configPath}`);
-  console.log(`Allowed roots: ${realRoots().join(', ')}`);
+  console.log(`Folders the phone can pick: ${config.roots === 'all' ? `anywhere (${realRoots().join(' ')})` : realRoots().join(', ')}`);
   console.log('Harnesses:');
   for (const h of harnesses) console.log(`  ${h.available ? '✓' : '✗'} ${h.name}${h.available ? '' : `  (${h.reason})`}`);
   if (!harnesses.some((h) => h.available)) console.log('  None of the harnesses are usable yet. Install one (e.g. `pip install aider-chat` or `npm i -g opencode-ai`) and restart.');
