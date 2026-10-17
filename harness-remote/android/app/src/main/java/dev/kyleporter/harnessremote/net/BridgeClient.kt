@@ -38,6 +38,7 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
     private val rid = AtomicInteger()
     private val eventFlows = HashMap<String, MutableStateFlow<List<BridgeEvent>>>()
     private val progressFlows = HashMap<String, MutableStateFlow<Map<String, String>>>()
+    private val activityFlows = HashMap<String, MutableStateFlow<Activity?>>()
     private val subscribed = LinkedHashSet<String>()
     private val synced = HashSet<String>()
     private var socket: WebSocket? = null
@@ -152,6 +153,7 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
                 setSessions(parseSessions(o.optJSONArray("sessions")))
             }
             "sessions" -> setSessions(parseSessions(o.optJSONArray("sessions")))
+            "activity" -> activityFlows.getOrPut(o.str("id")) { MutableStateFlow(null) }.value = parseActivity(o.optJSONObject("activity"))
             "progress" -> {
                 val flow = progressFlows.getOrPut(o.str("id")) { MutableStateFlow(emptyMap()) }
                 flow.value = flow.value + (o.str("toolId") to o.str("text"))
@@ -197,12 +199,15 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
 
     fun progress(id: String): StateFlow<Map<String, String>> = progressFlows.getOrPut(id) { MutableStateFlow(emptyMap()) }
 
+    fun activity(id: String): StateFlow<Activity?> = activityFlows.getOrPut(id) { MutableStateFlow(null) }
+
     suspend fun subscribe(id: String) {
         subscribed.add(id)
         val flow = eventFlows.getOrPut(id) { MutableStateFlow(emptyList()) }
         val after = if (id in synced) flow.value.lastOrNull()?.seq ?: 0L else 0L
         val r = request("subscribe") { put("id", id); put("after", after) }
         val incoming = parseEvents(r.optJSONArray("events"))
+        activityFlows.getOrPut(id) { MutableStateFlow(null) }.value = parseActivity(r.optJSONObject("activity"))
         flow.value = (flow.value + incoming).distinctBy { it.seq }.sortedBy { it.seq }
         synced.add(id)
     }

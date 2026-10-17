@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -819,6 +819,20 @@ function contentText(result) {
   return ((result && result.content) || []).filter((c) => c && c.type === 'text').map((c) => c.text).join('\n');
 }
 
+// Partial JSON of a tool call that is still being written: show the interesting field as text.
+function previewToolArgs(args) {
+  const field = (name) => {
+    const m = args.match(new RegExp(`"${name}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)`));
+    if (!m) return null;
+    return m[1].replace(/\\(u[0-9a-fA-F]{4}|.)/g, (x, c) =>
+      (c[0] === 'u' && c.length === 5 ? String.fromCharCode(parseInt(c.slice(1), 16)) : c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '' : c));
+  };
+  const body = ['command', 'content', 'new_text', 'newText', 'text', 'code', 'script'].map(field).find((v) => v !== null);
+  const where = ['path', 'file_path', 'url', 'query'].map(field).find((v) => v !== null);
+  const text = body !== undefined ? (where ? `${where}\n${body}` : body) : where !== undefined ? where : args;
+  return text.length > 3000 ? text.slice(-3000) : text;
+}
+
 function toolResultText(result) {
   const text = contentText(result);
   return text.length > 4000 ? `${text.slice(0, 4000)}\n… (${text.length - 4000} more characters)` : text;
@@ -849,12 +863,36 @@ function piRecordHandler(s, p) {
     if (!p.streamTimer) p.streamTimer = setTimeout(streamFlush, FLUSH_MS);
   };
   p.streamFlush = streamFlush;
+
+  // What pi is doing right now, so the phone never shows a bare "Working…": waiting on the model,
+  // thinking, writing, preparing a tool call (arguments stream in), running a tool, retrying.
+  const calls = new Map();
+  let activityTimer = null;
+  const setActivity = (phase, label) => {
+    if (s.activity && s.activity.phase === phase && s.activity.label === label) return;
+    s.activity = phase ? { phase, label, chars: 0, since: Date.now() } : null;
+    clearTimeout(activityTimer);
+    activityTimer = null;
+    broadcastActivity(s);
+  };
+  const addChars = (n) => {
+    if (!s.activity) return;
+    s.activity.chars += n;
+    if (!activityTimer) activityTimer = setTimeout(() => { activityTimer = null; broadcastActivity(s); }, 1000);
+  };
+  const waitingLabel = () => `Waiting for ${s.model || 'the model'}`;
   return (o) => {
     switch (o.type) {
       case 'agent_start':
         if (s.state !== 'waiting') setState(s, 'running');
+        setActivity('waiting', waitingLabel());
+        return;
+      case 'turn_start':
+        setActivity('waiting', waitingLabel());
         return;
       case 'agent_settled':
+        setActivity(null);
+        calls.clear();
         streamFlush();
         if (o.aborted) pushEvent(s, { kind: 'status', text: 'Interrupted' });
         p.asks.clear();
@@ -863,8 +901,27 @@ function piRecordHandler(s, p) {
         return;
       case 'message_update': {
         const e = o.assistantMessageEvent || {};
-        if (e.type === 'text_delta') streamAppend('text', e.delta);
-        else if (e.type === 'thinking_delta') streamAppend('think', e.delta);
+        if (e.type === 'text_delta') {
+          setActivity('writing', 'Writing');
+          addChars((e.delta || '').length);
+          streamAppend('text', e.delta);
+        } else if (e.type === 'thinking_delta') {
+          setActivity('thinking', 'Thinking');
+          addChars((e.delta || '').length);
+          streamAppend('think', e.delta);
+        } else if (e.type === 'toolcall_start') {
+          streamFlush();
+          calls.set(e.contentIndex, { id: e.id, name: e.toolName, args: '' });
+          setActivity('calling', `Preparing ${e.toolName}`);
+          pushEvent(s, { kind: 'tool', toolId: e.id, tool: e.toolName, text: '', preparing: true });
+        } else if (e.type === 'toolcall_delta') {
+          const call = calls.get(e.contentIndex);
+          if (!call || !e.delta) return;
+          call.args += e.delta;
+          addChars(e.delta.length);
+          p.progress.set(call.id, previewToolArgs(call.args));
+          if (!p.progressTimer) p.progressTimer = setTimeout(sendProgress, 250);
+        }
         return;
       }
       case 'message_end': {
@@ -876,6 +933,7 @@ function piRecordHandler(s, p) {
         return;
       }
       case 'tool_execution_start':
+        if (!o.parentToolCallId) setActivity('running', `Running ${o.toolName}`);
         streamFlush();
         pushEvent(s, { kind: 'tool', toolId: o.toolCallId, tool: o.toolName, text: toolSummary(o.args), parent: o.parentToolCallId || undefined });
         return;
@@ -886,14 +944,17 @@ function piRecordHandler(s, p) {
         return;
       }
       case 'tool_execution_end':
+        if (!o.parentToolCallId) setActivity('waiting', waitingLabel());
         p.progress.delete(o.toolCallId);
         streamFlush();
         pushEvent(s, { kind: 'toolres', toolId: o.toolCallId, tool: o.toolName, isError: !!o.isError, durationMs: o.durationMs || 0, text: toolResultText(o.result) });
         return;
       case 'auto_retry_start':
+        setActivity('retry', `Retrying (${o.attempt}/${o.maxAttempts})`);
         pushEvent(s, { kind: 'status', text: `Retrying (${o.attempt}/${o.maxAttempts}): ${o.errorMessage || ''}` });
         return;
       case 'compaction_start':
+        setActivity('compacting', 'Compacting the conversation');
         pushEvent(s, { kind: 'status', text: 'Compacting the conversation to fit the context window…' });
         return;
       case 'extension_ui_request':
@@ -1126,6 +1187,7 @@ function startProcess(s, harness, prompt) {
     flush();
     clearTimeout(p.waitTimer);
     if (p.streamFlush) p.streamFlush();
+    if (s.activity) { s.activity = null; broadcastActivity(s); }
     if (procs.get(s.id) === p) procs.delete(s.id);
     const text = failure ? `Failed to start ${h.command}: ${failure}` : p.stopped || signal ? 'Stopped' : `Exited with code ${code}`;
     if (!p.quiet) pushEvent(s, { kind: 'exit', code: failure ? -1 : code ?? null, text });
@@ -1379,6 +1441,11 @@ function broadcastEvent(s, ev) {
   for (const c of clients) if (c.subs.has(s.id)) c.send({ t: 'event', id: s.id, ev });
 }
 
+function broadcastActivity(s) {
+  const a = s.activity;
+  for (const c of clients) if (c.subs.has(s.id)) c.send({ t: 'activity', id: s.id, activity: a || null });
+}
+
 function broadcastProgress(s, toolId, text) {
   for (const c of clients) if (c.subs.has(s.id)) c.send({ t: 'progress', id: s.id, toolId, text });
 }
@@ -1432,7 +1499,7 @@ async function handle(c, raw) {
         const s = need(msg.id);
         c.subs.add(s.id);
         const after = Number(msg.after) || 0;
-        return reply({ t: 'history', id: s.id, session: summary(s), events: s.events.filter((e) => e.seq > after) });
+        return reply({ t: 'history', id: s.id, session: summary(s), events: s.events.filter((e) => e.seq > after), activity: s.activity || null });
       }
       case 'unsubscribe': c.subs.delete(msg.id); return reply({ t: 'ok' });
       case 'send': {

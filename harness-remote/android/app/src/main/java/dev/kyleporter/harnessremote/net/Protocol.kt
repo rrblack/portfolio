@@ -90,6 +90,7 @@ data class BridgeEvent(
     val placeholder: String = "",
     val steer: Boolean = false,
     val queued: Boolean = false,
+    val preparing: Boolean = false,
     val thumbs: List<String> = emptyList(),
     val parent: String = "",
 )
@@ -99,6 +100,11 @@ data class ModelInfo(val provider: String, val name: String, val params: String,
 data class Photo(val data: String, val mimeType: String, val thumb: String)
 
 val EFFORT_LEVELS = listOf("off", "minimal", "low", "medium", "high")
+
+data class Activity(val phase: String, val label: String, val chars: Long, val since: Long)
+
+fun parseActivity(o: JSONObject?): Activity? =
+    o?.let { Activity(it.str("phase"), it.str("label"), it.optLong("chars"), it.optLong("since")) }
 
 data class ModelCatalog(val models: List<ModelInfo>, val errors: Map<String, String>, val lms: Boolean)
 
@@ -196,6 +202,7 @@ fun parseEvent(o: JSONObject) = BridgeEvent(
     placeholder = o.str("placeholder"),
     steer = o.optBoolean("steer"),
     queued = o.optBoolean("queued"),
+    preparing = o.optBoolean("preparing"),
     thumbs = o.optJSONArray("thumbs").strings(),
     parent = o.str("parent"),
 )

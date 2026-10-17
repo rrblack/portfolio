@@ -1,6 +1,11 @@
 package dev.kyleporter.harnessremote.ui
 
 import androidx.compose.foundation.BorderStroke
+import dev.kyleporter.harnessremote.net.Activity
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
@@ -132,6 +137,7 @@ private sealed interface Item {
         val result: String?,
         val isError: Boolean,
         val durationMs: Long,
+        val preparing: Boolean = false,
     ) : Item
     data class Ask(
         override val key: String,
@@ -197,8 +203,14 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
             "user" -> { flush(); out += Item.User("u${e.seq}", e.text, e.steer, e.queued, e.thumbs) }
             "tool" -> {
                 flush()
-                tools[e.toolId] = out.size
-                out += Item.Tool("t${e.seq}", e.toolId, e.parent.isNotEmpty(), e.tool, e.text, null, false, 0)
+                val i = tools[e.toolId]
+                val t = i?.let { out[it] as? Item.Tool }
+                if (i != null && t != null) {
+                    out[i] = t.copy(summary = e.text.ifBlank { t.summary }, preparing = e.preparing)
+                } else {
+                    tools[e.toolId] = out.size
+                    out += Item.Tool("t${e.seq}", e.toolId, e.parent.isNotEmpty(), e.tool, e.text, null, false, 0, e.preparing)
+                }
             }
             "toolres" -> {
                 flush()
@@ -278,6 +290,8 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     val conn by client.conn.collectAsState()
     val events by client.events(id).collectAsState()
     val progress by client.progress(id).collectAsState()
+    val liveActivity by client.activity(id).collectAsState()
+    val sent = remember { mutableStateMapOf<String, String>() }
     val session = sessions.find { it.id == id }
     val harness = hello?.harnesses?.find { it.id == session?.harness }
     val interactive = harness?.mode == "interactive"
@@ -344,6 +358,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
         else -> null
     }
     val busy = session?.busy == true
+    val pendingAsk = if (session?.state == "waiting") items.lastOrNull { it is Item.Ask && it.answer == null && sent[it.askId] == null } as? Item.Ask else null
 
     Scaffold(
         containerColor = Black,
@@ -399,20 +414,18 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                         answerable = session?.state == "waiting",
                         progress = (item as? Item.Tool)?.let { progress[it.toolId] },
                         thinkingLive = busy && item === items.lastOrNull(),
-                    ) { askId, value, confirmed, cancelled, failed ->
-                        follow = true
-                        act {
-                            try { client.answer(id, askId, value, confirmed, cancelled) } catch (e: Exception) { failed(); throw e }
-                        }
-                    }
+                        sentAnswer = (item as? Item.Ask)?.let { sent[it.askId] },
+                    )
                 }
                 if (showWorking && session != null) {
                     item(key = "working") {
                         WorkingLine(
                             waiting = session.state == "waiting",
-                            waitingOnCard = items.any { it is Item.Ask && it.answer == null },
-                            activity = activity,
-                            startedAtLocal = session.runningSince + client.clockOffset,
+                            waitingOnCard = pendingAsk != null,
+                            live = liveActivity,
+                            fallback = activity,
+                            turnStartLocal = session.runningSince + client.clockOffset,
+                            clockOffset = client.clockOffset,
                         )
                     }
                 }
@@ -451,6 +464,16 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                             label = { Text(label, fontFamily = Mono, fontSize = 12.sp) },
                             colors = AssistChipDefaults.assistChipColors(containerColor = Surface, labelColor = OffWhite),
                         )
+                    }
+                }
+            }
+
+            pendingAsk?.let { ask ->
+                ApprovalPanel(ask, listScrolling = listState.isScrollInProgress) { label, value, confirmed, cancelled ->
+                    sent[ask.askId] = label
+                    follow = true
+                    act {
+                        try { client.answer(id, ask.askId, value, confirmed, cancelled) } catch (e: Exception) { sent.remove(ask.askId); throw e }
                     }
                 }
             }
@@ -559,10 +582,8 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     }
 }
 
-private typealias Answer = (askId: String, value: String?, confirmed: Boolean?, cancelled: Boolean, failed: () -> Unit) -> Unit
-
 @Composable
-private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkingLive: Boolean, onAnswer: Answer) {
+private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkingLive: Boolean, sentAnswer: String?) {
     when (item) {
         is Item.User -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
             if (item.thumbs.isNotEmpty()) {
@@ -590,7 +611,7 @@ private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkin
         }
         is Item.Thinking -> ThinkingBlock(item, live = !item.done && thinkingLive)
         is Item.Tool -> ToolBlock(item, progress)
-        is Item.Ask -> AskCard(item, answerable, onAnswer)
+        is Item.Ask -> AskSummary(item, answerable, sentAnswer)
         is Item.Output -> if (item.err) WarningBlock(item) else SelectionContainer {
             Text(
                 item.text,
@@ -653,6 +674,7 @@ private fun ToolBlock(item: Item.Tool, progress: String?) {
     var expanded by rememberSaveable(item.key) { mutableStateOf(false) }
     val running = item.result == null
     val dot = when {
+        running && item.preparing -> Gray
         running -> Amber
         item.isError -> Red
         else -> Green
@@ -674,6 +696,7 @@ private fun ToolBlock(item: Item.Tool, progress: String?) {
         Row(Modifier.padding(start = 18.dp)) {
             Text("⎿  ", color = Gray, fontFamily = Mono, fontSize = 12.sp)
             val body = when {
+                running && item.preparing && progress.isNullOrBlank() -> "The model is writing this call…"
                 running && !progress.isNullOrBlank() -> {
                     val live = cleanTerminal(progress).trimEnd().lines()
                     (if (live.size > LIVE_LINES) listOf("… ${live.size - LIVE_LINES} earlier lines") else emptyList<String>())
@@ -695,93 +718,116 @@ private fun ToolBlock(item: Item.Tool, progress: String?) {
     }
 }
 
+private fun askHeading(item: Item.Ask) = item.title.lineSequence().firstOrNull().orEmpty()
+
+private fun askDetail(item: Item.Ask) =
+    (item.title.lines().drop(1) + listOfNotNull(item.message.ifBlank { null })).joinToString("\n").trim()
+
+// In the transcript a question is one line; the buttons live in the docked ApprovalPanel.
 @Composable
-private fun AskCard(item: Item.Ask, answerable: Boolean, onAnswer: Answer) {
-    val heading = item.title.lineSequence().firstOrNull().orEmpty()
-    val detail = (item.title.lines().drop(1) + listOfNotNull(item.message.ifBlank { null })).joinToString("\n").trim()
-    var sent by rememberSaveable(item.key) { mutableStateOf<String?>(null) }
-    val answer = item.answer ?: sent
+private fun AskSummary(item: Item.Ask, answerable: Boolean, sentAnswer: String?) {
+    val answer = item.answer ?: sentAnswer
+    val heading = askHeading(item)
+    val pending = answer == null && answerable
+    val declined = answer != null && (answer.startsWith("No") || answer == "Cancelled" || answer.startsWith("Deny") || answer.startsWith("Block"))
+    val summary = askDetail(item).lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.endsWith(":") } ?: heading
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+        Text(
+            when { pending -> "●"; answer == null -> "–"; declined -> "✗"; else -> "✓" },
+            color = when { pending -> if (heading.startsWith("⚠")) Red else Amber; answer == null -> Gray; declined -> Red; else -> Green },
+            fontSize = 13.sp, modifier = Modifier.width(18.dp),
+        )
+        Text(
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = if (pending) Amber else OffWhite)) {
+                    append(
+                        when {
+                            pending -> "${heading.removePrefix("⚠ ")} · answer below"
+                            answer == null -> "Expired"
+                            item.answer == null -> "Sending: $answer"
+                            declined -> "Declined"
+                            else -> answer
+                        },
+                    )
+                }
+                withStyle(SpanStyle(color = Gray)) { append("  ·  $summary") }
+            },
+            fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+// Docked above the input so scrolling the chat can't land on a button. Buttons stay inactive until
+// the panel has been visible for a moment and nothing is scrolling.
+@Composable
+private fun ApprovalPanel(
+    item: Item.Ask,
+    listScrolling: Boolean,
+    onReply: (label: String, value: String?, confirmed: Boolean?, cancelled: Boolean) -> Unit,
+) {
+    val heading = askHeading(item)
+    val detail = askDetail(item)
     val danger = heading.startsWith("⚠")
     val accent = if (danger) Red else Amber
-
-    if (answer != null || !answerable) {
-        val declined = answer == null || answer.startsWith("No") || answer == "Cancelled" || answer.startsWith("Deny") || answer.startsWith("Block")
-        val summary = detail.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.endsWith(":") } ?: heading
-        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
-            Text(
-                when { answer == null -> "–"; declined -> "✗"; else -> "✓" },
-                color = when { answer == null -> Gray; declined -> Red; else -> Green },
-                fontSize = 13.sp, modifier = Modifier.width(18.dp),
-            )
-            Text(
-                buildAnnotatedString {
-                    withStyle(SpanStyle(color = OffWhite)) {
-                        append(
-                            when {
-                                answer == null -> "Expired"
-                                item.answer == null -> "Sending: $answer"
-                                declined -> "Declined"
-                                else -> answer
-                            },
-                        )
-                    }
-                    withStyle(SpanStyle(color = Gray)) { append("  ·  $summary") }
-                },
-                fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-            )
+    val detailScroll = rememberScrollState()
+    var armed by remember(item.key) { mutableStateOf(false) }
+    LaunchedEffect(item.key, listScrolling, detailScroll.isScrollInProgress) {
+        armed = false
+        if (!listScrolling && !detailScroll.isScrollInProgress) {
+            delay(600)
+            armed = true
         }
-        return
     }
-
     var text by rememberSaveable(item.key + "text") { mutableStateOf(item.placeholder) }
-    fun reply(label: String, value: String?, confirmed: Boolean?, cancelled: Boolean) {
-        sent = label
-        onAnswer(item.askId, value, confirmed, cancelled) { sent = null }
-    }
     Column(
         Modifier
             .fillMaxWidth()
-            .border(BorderStroke(if (danger) 2.dp else 1.dp, accent), RoundedCornerShape(10.dp))
-            .background(Surface, RoundedCornerShape(10.dp))
+            .background(Surface)
+            .border(BorderStroke(if (danger) 2.dp else 1.dp, accent), RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(heading, color = accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         if (detail.isNotBlank()) {
-            Text(
-                detail,
-                Modifier.fillMaxWidth().background(Black, RoundedCornerShape(6.dp)).padding(8.dp),
-                color = OffWhite, fontFamily = Mono, fontSize = 12.sp, lineHeight = 16.sp,
-            )
+            Box(
+                Modifier.fillMaxWidth().heightIn(max = 150.dp).background(Black, RoundedCornerShape(6.dp))
+                    .verticalScroll(detailScroll).padding(8.dp),
+            ) {
+                Text(detail, color = OffWhite, fontFamily = Mono, fontSize = 12.sp, lineHeight = 16.sp)
+            }
         }
+        val buttonColors = ButtonDefaults.outlinedButtonColors(disabledContentColor = Gray.copy(alpha = 0.5f))
         when (item.method) {
             "select" -> item.options.forEachIndexed { i, option ->
                 val negative = option.equals("No", true) || option.startsWith("No,") || option.equals("Deny", true) || option.equals("Block", true)
                 OutlinedButton(
-                    onClick = { reply(option, option, null, false) },
-                    modifier = Modifier.fillMaxWidth(),
-                    border = BorderStroke(1.dp, if (negative) SurfaceHigh else accent.copy(alpha = 0.6f)),
+                    onClick = { onReply(option, option, null, false) },
+                    enabled = armed,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp),
+                    colors = buttonColors,
+                    border = BorderStroke(1.dp, if (negative || !armed) SurfaceHigh else accent.copy(alpha = 0.6f)),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                 ) {
-                    Text("${i + 1}. $option", color = if (negative) Gray else OffWhite, modifier = Modifier.fillMaxWidth(), fontSize = 13.sp)
+                    Text("${i + 1}. $option", color = if (!armed) Gray.copy(alpha = 0.5f) else if (negative) Gray else OffWhite, modifier = Modifier.fillMaxWidth(), fontSize = 13.sp)
                 }
             }
             "confirm" -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { reply("Yes", null, true, false) }, modifier = Modifier.weight(1f), border = BorderStroke(1.dp, accent.copy(alpha = 0.6f))) {
-                    Text("Yes", color = OffWhite)
+                OutlinedButton(onClick = { onReply("Yes", null, true, false) }, enabled = armed, colors = buttonColors, modifier = Modifier.weight(1f), border = BorderStroke(1.dp, accent.copy(alpha = 0.6f))) {
+                    Text("Yes")
                 }
-                OutlinedButton(onClick = { reply("No", null, false, false) }, modifier = Modifier.weight(1f)) { Text("No", color = Gray) }
+                OutlinedButton(onClick = { onReply("No", null, false, false) }, enabled = armed, colors = buttonColors, modifier = Modifier.weight(1f)) { Text("No") }
             }
             else -> {
                 OutlinedTextField(
                     value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(),
-                    maxLines = if (item.method == "editor") 10 else 3,
+                    maxLines = if (item.method == "editor") 8 else 3,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = accent, unfocusedBorderColor = SurfaceHigh),
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { reply(text, text, null, false) }, modifier = Modifier.weight(1f), border = BorderStroke(1.dp, accent.copy(alpha = 0.6f))) {
-                        Text("Send", color = OffWhite)
+                    OutlinedButton(onClick = { onReply(text, text, null, false) }, enabled = armed, colors = buttonColors, modifier = Modifier.weight(1f), border = BorderStroke(1.dp, accent.copy(alpha = 0.6f))) {
+                        Text("Send")
                     }
-                    OutlinedButton(onClick = { reply("Cancelled", null, null, true) }, modifier = Modifier.weight(1f)) { Text("Cancel", color = Gray) }
+                    OutlinedButton(onClick = { onReply("Cancelled", null, null, true) }, enabled = armed, colors = buttonColors, modifier = Modifier.weight(1f)) { Text("Cancel") }
                 }
             }
         }
@@ -823,7 +869,6 @@ private fun Dot(color: androidx.compose.ui.graphics.Color, modifier: Modifier = 
     }
 }
 
-private val VERBS = listOf("Working", "Pondering", "Cooking", "Brewing", "Crafting", "Tinkering", "Computing")
 
 @Composable
 fun Spinner(color: androidx.compose.ui.graphics.Color, size: Dp = 14.dp) {
@@ -846,11 +891,18 @@ fun Spinner(color: androidx.compose.ui.graphics.Color, size: Dp = 14.dp) {
     }
 }
 
+private fun formatElapsed(secs: Long) = if (secs < 60) "${secs}s" else "${secs / 60}m ${(secs % 60).toString().padStart(2, '0')}s"
+
+private fun formatTokens(chars: Long): String {
+    val t = chars / 4
+    return if (t >= 1000) "~%.1fk tokens".format(t / 1000.0) else "~$t tokens"
+}
+
 @Composable
-private fun WorkingLine(waiting: Boolean, waitingOnCard: Boolean, activity: String?, startedAtLocal: Long) {
+private fun WorkingLine(waiting: Boolean, waitingOnCard: Boolean, live: Activity?, fallback: String?, turnStartLocal: Long, clockOffset: Long) {
     if (waiting) {
         Text(
-            if (waitingOnCard) "● Waiting for your answer above" else "● Waiting for your input",
+            if (waitingOnCard) "● Waiting for your approval below" else "● Waiting for your input",
             color = Amber, fontSize = 13.sp, modifier = Modifier.padding(vertical = 4.dp),
         )
         return
@@ -864,21 +916,29 @@ private fun WorkingLine(waiting: Boolean, waitingOnCard: Boolean, activity: Stri
     }
     val shimmer by rememberInfiniteTransition(label = "shimmer")
         .animateFloat(0.55f, 1f, infiniteRepeatable(tween(900, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "alpha")
-    val verb = activity ?: VERBS[((startedAtLocal / 1000) % VERBS.size).toInt().let { if (it < 0) it + VERBS.size else it }]
-    val secs = if (startedAtLocal > 0) ((now - startedAtLocal) / 1000).coerceAtLeast(0) else -1
-    val elapsed = when {
-        secs < 0 -> ""
-        secs < 60 -> "${secs}s"
-        else -> "${secs / 60}m ${(secs % 60).toString().padStart(2, '0')}s"
-    }
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterStart) { Spinner(Red, 13.dp) }
-        Text(
-            buildAnnotatedString {
-                withStyle(SpanStyle(color = Red.copy(alpha = shimmer), fontWeight = FontWeight.Medium)) { append("$verb…") }
-                if (elapsed.isNotEmpty()) withStyle(SpanStyle(color = Gray)) { append("  ($elapsed)") }
-            },
-            fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-        )
+    val label = live?.label?.ifBlank { null } ?: fallback ?: "Working"
+    val since = if (live != null && live.since > 0) live.since + clockOffset else turnStartLocal
+    val secs = if (since > 0) ((now - since) / 1000).coerceAtLeast(0) else -1
+    val details = listOfNotNull(
+        live?.chars?.takeIf { it > 0 }?.let(::formatTokens),
+        secs.takeIf { it >= 0 }?.let(::formatElapsed),
+    ).joinToString(" · ")
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterStart) { Spinner(Red, 13.dp) }
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(color = Red.copy(alpha = shimmer), fontWeight = FontWeight.Medium)) { append("$label…") }
+                    if (details.isNotEmpty()) withStyle(SpanStyle(color = Gray)) { append("  ($details)") }
+                },
+                fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (live?.phase == "waiting" && secs >= 20) {
+            Text(
+                "Nothing from the model yet. LM Studio may be loading the model or reading a long prompt; check its window for progress.",
+                color = Gray, fontSize = 11.sp, modifier = Modifier.padding(start = 18.dp, top = 2.dp),
+            )
+        }
     }
 }
