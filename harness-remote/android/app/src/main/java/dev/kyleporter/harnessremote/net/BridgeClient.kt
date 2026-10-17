@@ -49,6 +49,9 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
 
     var onSessions: ((old: List<SessionSummary>, new: List<SessionSummary>) -> Unit)? = null
 
+    @Volatile var clockOffset = 0L
+        private set
+
     fun connect() {
         wanted = true
         retryJob?.cancel()
@@ -141,7 +144,9 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
     private fun handle(o: JSONObject) {
         when (o.str("t")) {
             "hello" -> {
-                hello.value = parseHello(o)
+                val h = parseHello(o)
+                if (h.now > 0) clockOffset = System.currentTimeMillis() - h.now
+                hello.value = h
                 setSessions(parseSessions(o.optJSONArray("sessions")))
             }
             "sessions" -> setSessions(parseSessions(o.optJSONArray("sessions")))
@@ -199,9 +204,10 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
 
     suspend fun listDir(path: String?): DirListing = parseListing(request("ls") { if (path != null) put("path", path) })
 
-    suspend fun create(harness: String, cwd: String, model: String, provider: String, title: String): SessionSummary {
+    suspend fun create(harness: String, cwd: String, model: String, provider: String, title: String, askPermission: Boolean = true): SessionSummary {
         val r = request("create") {
             put("harness", harness); put("cwd", cwd); put("model", model); put("provider", provider); put("title", title)
+            put("permissions", if (askPermission) "ask" else "auto")
         }
         val s = parseSession(r.getJSONObject("session"))
         subscribed.add(s.id)
@@ -212,6 +218,15 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
     suspend fun send(id: String, text: String) { request("send") { put("id", id); put("text", text) } }
 
     suspend fun stdin(id: String, data: String) { request("stdin") { put("id", id); put("data", data) } }
+
+    suspend fun answer(id: String, askId: String, value: String? = null, confirmed: Boolean? = null, cancelled: Boolean = false) {
+        request("answer") {
+            put("id", id); put("askId", askId)
+            if (value != null) put("value", value)
+            if (confirmed != null) put("confirmed", confirmed)
+            if (cancelled) put("cancelled", true)
+        }
+    }
 
     suspend fun stop(id: String) { request("stop") { put("id", id) } }
 

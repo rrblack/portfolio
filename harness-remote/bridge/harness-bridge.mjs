@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.2.2';
+const VERSION = '0.3.0';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 1024 * 1024;
@@ -109,10 +109,10 @@ const PRESETS = [
   {
     id: 'pi',
     name: 'Pi',
-    description: 'pi --print with its own pi session per phone session. The bridge adds the model you pick to ~/.pi/agent/models.json if it is missing.',
-    mode: 'turn',
+    description: 'Live thinking, tool calls and permission prompts (pi RPC mode). The bridge adds the model you pick to ~/.pi/agent/models.json if it is missing.',
+    mode: 'rpc',
     command: 'pi',
-    args: ['--print', '--session-id', 'harness-remote-{session}', '{modelArgs}', '--', '{prompt}'],
+    args: ['--mode', 'rpc', '--session-id', 'harness-remote-{session}', '{modelArgs}', '-e', '{piPermissionExtension}'],
     ignoreStderr: ["^Warning: No project session found with id 'harness-remote-"],
     backends: {
       [LMSTUDIO]: { modelArgs: ['--provider', 'lmstudio', '--model', '{model}'], piProvider: { key: 'lmstudio', baseUrl: '{lmstudio}/v1', apiKey: 'lm-studio' } },
@@ -283,7 +283,7 @@ function publicHarness(h) {
     id: h.id,
     name: h.name || h.id,
     description: h.description || '',
-    mode: h.mode === 'interactive' ? 'interactive' : 'turn',
+    mode: h.mode === 'interactive' || h.mode === 'rpc' ? h.mode : 'turn',
     models: providersOf(h).length ? providersOf(h) : null,
     requiresModel: !!h.requiresModel,
     available: !unavailableReason(h),
@@ -465,6 +465,160 @@ function ensurePiModel(spec, model, vars) {
   return file;
 }
 
+// ---------------------------------------------------------------- pi rpc
+
+// Loaded into pi with -e. Asks the phone before any tool that is not read-only, like Claude Code does.
+const PI_PERMISSION_EXTENSION = `// Written by Harness Bridge. Asks the Harness Remote app before pi runs tools that can change things.
+const READ_ONLY = new Set(['read', 'grep', 'find', 'ls']);
+
+function describe(name, input) {
+  const a = input || {};
+  if (typeof a.command === 'string') return a.command;
+  if (name === 'write' && typeof a.path === 'string') return a.path + ' (' + String(a.content || '').split('\\n').length + ' lines)';
+  if (typeof a.path === 'string') return a.path;
+  const json = JSON.stringify(a);
+  return json.length > 600 ? json.slice(0, 600) + '…' : json;
+}
+
+export default function (pi) {
+  const always = new Set();
+  pi.on('tool_call', async (event, ctx) => {
+    if (process.env.HARNESS_REMOTE_PERMISSIONS !== 'ask' || ctx.mode !== 'rpc' || event.parentToolCallId) return undefined;
+    const name = event.toolName;
+    if (READ_ONLY.has(name) || always.has(name)) return undefined;
+    const tool = pi.getAllTools().find((t) => t.name === name);
+    if (tool && tool.annotations && tool.annotations.readOnlyHint === true) return undefined;
+    const yesAll = 'Yes, and don\\'t ask again for ' + name + ' this session';
+    const choice = await ctx.ui.select('Allow ' + name + '?\\n' + describe(name, event.input), ['Yes', yesAll, 'No']);
+    if (choice === yesAll) always.add(name);
+    if (choice === 'Yes' || choice === yesAll) return undefined;
+    return { block: true, reason: 'The user declined this ' + name + ' call from their phone.' };
+  });
+}
+`;
+
+function piPermissionExtension() {
+  const file = path.join(path.dirname(configPath), 'pi-permissions.ts');
+  let current = null;
+  try { current = fs.readFileSync(file, 'utf8'); } catch {}
+  if (current !== PI_PERMISSION_EXTENSION) fs.writeFileSync(file, PI_PERMISSION_EXTENSION);
+  return file;
+}
+
+function rpcWrite(p, obj) {
+  try { p.child.stdin.write(JSON.stringify(obj) + '\n'); } catch {}
+}
+
+function toolSummary(args) {
+  const a = args || {};
+  const pick = [a.command, a.path, a.file_path, a.pattern, a.url, a.query].find((v) => typeof v === 'string');
+  const text = pick !== undefined ? pick : JSON.stringify(a);
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+}
+
+function toolResultText(result) {
+  const text = ((result && result.content) || []).filter((c) => c && c.type === 'text').map((c) => c.text).join('\n');
+  return text.length > 4000 ? `${text.slice(0, 4000)}\n… (${text.length - 4000} more characters)` : text;
+}
+
+// Turns pi's RPC event stream into transcript events.
+function piRecordHandler(s, p) {
+  p.stream = { kind: null, text: '' };
+  p.asks = new Map();
+  const streamFlush = () => {
+    clearTimeout(p.streamTimer);
+    p.streamTimer = null;
+    if (p.stream.text) pushEvent(s, { kind: p.stream.kind, text: p.stream.text });
+    p.stream = { kind: null, text: '' };
+  };
+  const streamAppend = (kind, delta) => {
+    if (!delta) return;
+    if (p.stream.kind !== kind) streamFlush();
+    p.stream.kind = kind;
+    p.stream.text += delta;
+    if (!p.streamTimer) p.streamTimer = setTimeout(streamFlush, FLUSH_MS);
+  };
+  p.streamFlush = streamFlush;
+  return (o) => {
+    switch (o.type) {
+      case 'agent_start':
+        if (s.state !== 'waiting') setState(s, 'running');
+        return;
+      case 'agent_settled':
+        streamFlush();
+        if (o.aborted) pushEvent(s, { kind: 'status', text: 'Interrupted' });
+        p.asks.clear();
+        setState(s, 'idle');
+        return;
+      case 'message_update': {
+        const e = o.assistantMessageEvent || {};
+        if (e.type === 'text_delta') streamAppend('text', e.delta);
+        else if (e.type === 'thinking_delta') streamAppend('think', e.delta);
+        return;
+      }
+      case 'message_end': {
+        const m = o.message || {};
+        if (m.role === 'assistant' && m.stopReason === 'error') {
+          streamFlush();
+          pushEvent(s, { kind: 'err', text: `Model error: ${m.errorMessage || 'unknown error'}\n` });
+        }
+        return;
+      }
+      case 'tool_execution_start':
+        if (o.parentToolCallId) return;
+        streamFlush();
+        pushEvent(s, { kind: 'tool', toolId: o.toolCallId, tool: o.toolName, text: toolSummary(o.args) });
+        return;
+      case 'tool_execution_end':
+        if (o.parentToolCallId) return;
+        streamFlush();
+        pushEvent(s, { kind: 'toolres', toolId: o.toolCallId, tool: o.toolName, isError: !!o.isError, durationMs: o.durationMs || 0, text: toolResultText(o.result) });
+        return;
+      case 'auto_retry_start':
+        pushEvent(s, { kind: 'status', text: `Retrying (${o.attempt}/${o.maxAttempts}): ${o.errorMessage || ''}` });
+        return;
+      case 'compaction_start':
+        pushEvent(s, { kind: 'status', text: 'Compacting the conversation to fit the context window…' });
+        return;
+      case 'extension_ui_request':
+        if (['select', 'confirm', 'input', 'editor'].includes(o.method)) {
+          streamFlush();
+          p.asks.set(o.id, o.method);
+          pushEvent(s, {
+            kind: 'ask', askId: o.id, method: o.method, text: o.title || '', message: o.message || '',
+            options: Array.isArray(o.options) ? o.options : [], placeholder: o.placeholder || o.prefill || '',
+          });
+          setState(s, 'waiting');
+        } else if (o.method === 'notify' && o.message) {
+          pushEvent(s, { kind: 'status', text: o.message });
+        }
+        return;
+      case 'extension_error':
+        pushEvent(s, { kind: 'err', text: `Extension error (${o.event}): ${o.error}\n` });
+        return;
+      case 'response':
+        if (o.success === false) pushEvent(s, { kind: 'err', text: `pi rejected ${o.command}: ${o.error || 'unknown error'}\n` });
+        return;
+      default:
+    }
+  };
+}
+
+function answerAsk(s, askId, msg) {
+  const p = procs.get(s.id);
+  if (!p || !p.asks || !p.asks.has(askId)) throw new Error('That question is no longer waiting for an answer');
+  const method = p.asks.get(askId);
+  p.asks.delete(askId);
+  const resp = { type: 'extension_ui_response', id: askId };
+  let shown;
+  if (msg.cancelled) { resp.cancelled = true; shown = 'Cancelled'; }
+  else if (method === 'confirm') { resp.confirmed = !!msg.confirmed; shown = msg.confirmed ? 'Yes' : 'No'; }
+  else { resp.value = String(msg.value ?? ''); shown = resp.value; }
+  rpcWrite(p, resp);
+  pushEvent(s, { kind: 'answer', askId, text: shown });
+  if (!p.asks.size && s.state === 'waiting') setState(s, 'running');
+}
+
 // ---------------------------------------------------------------- sessions
 
 const sessions = new Map();
@@ -483,15 +637,15 @@ function scheduleSave() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, createdAt, updatedAt, turns, state, seq, events }));
+    const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, permissions, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, permissions, createdAt, updatedAt, turns, state, seq, events }));
     try { saveJson(sessionsPath, data, 0o600); } catch (e) { console.error('save failed:', e.message); }
   }, 1000);
 }
 
 function summary(s) {
-  const last = [...s.events].reverse().find((e) => e.kind === 'user' || e.kind === 'out');
+  const last = [...s.events].reverse().find((e) => ['user', 'out', 'text', 'ask', 'tool'].includes(e.kind));
   return {
-    id: s.id, title: s.title, harness: s.harness, cwd: s.cwd, model: s.model, provider: s.provider || '',
+    id: s.id, title: s.title, harness: s.harness, cwd: s.cwd, model: s.model, provider: s.provider || '', permissions: s.permissions || 'ask', runningSince: s.runningSince || 0,
     createdAt: s.createdAt, updatedAt: s.updatedAt, turns: s.turns, state: s.state, seq: s.seq,
     preview: last ? stripAnsi(last.text || '').trim().slice(-160) : '',
   };
@@ -513,13 +667,15 @@ function pushEvent(s, ev) {
 
 function setState(s, state) {
   if (s.state === state) return;
+  if (state === 'running' && s.state !== 'waiting') s.runningSince = Date.now();
+  if (state === 'idle' || state === 'exited') s.runningSince = 0;
   s.state = state;
   s.updatedAt = Date.now();
   broadcastSessions();
   scheduleSave();
 }
 
-function createSession({ harness, cwd, model, provider, title }) {
+function createSession({ harness, cwd, model, provider, title, permissions }) {
   const h = harnessList().find((x) => x.id === harness);
   if (!h) throw new Error(`Unknown harness: ${harness}`);
   const reason = unavailableReason(h);
@@ -532,7 +688,7 @@ function createSession({ harness, cwd, model, provider, title }) {
   const id = crypto.randomBytes(6).toString('hex');
   const now = Date.now();
   const s = {
-    id, harness: h.id, cwd: dir, model: model || '', provider: backend, turns: 0, state: 'idle', seq: 0, events: [],
+    id, harness: h.id, cwd: dir, model: model || '', provider: backend, permissions: permissions === 'auto' ? 'auto' : 'ask', turns: 0, state: 'idle', seq: 0, events: [],
     title: (title || '').trim() || `${h.name || h.id} · ${path.basename(dir)}`,
     createdAt: now, updatedAt: now,
   };
@@ -547,6 +703,13 @@ function createSession({ harness, cwd, model, provider, title }) {
 function startProcess(s, harness, prompt) {
   const h = withBackend(harness, s.provider);
   const vars = { prompt: prompt ?? '', model: s.model, provider: s.provider || '', session: s.id, cwd: s.cwd, ollama: config.ollama, lmstudio: config.lmstudio };
+  const rpc = h.mode === 'rpc';
+  if ((h.args || []).includes('{piPermissionExtension}')) {
+    try { vars.piPermissionExtension = piPermissionExtension(); } catch (e) {
+      pushEvent(s, { kind: 'err', text: `Could not write the permission extension: ${e.message}\n` });
+      return null;
+    }
+  }
   if (h.piProvider && s.model) {
     try {
       const file = ensurePiModel(h.piProvider, s.model, vars);
@@ -567,8 +730,9 @@ function startProcess(s, harness, prompt) {
     return null;
   }
   const interactive = h.mode === 'interactive';
-  const stdinMode = h.stdin || (interactive || h.pty ? 'pipe' : 'ignore');
+  const stdinMode = h.stdin || (interactive || rpc || h.pty ? 'pipe' : 'ignore');
   const env = buildEnv(h, vars);
+  if (rpc) env.HARNESS_REMOTE_PERMISSIONS = s.permissions === 'auto' ? 'auto' : 'ask';
   if (h.pty) env.TERM = env.TERM && env.TERM !== 'dumb' ? env.TERM : 'xterm-256color';
 
   let child;
@@ -580,9 +744,9 @@ function startProcess(s, harness, prompt) {
     return null;
   }
 
-  const p = { child, harness: h, buf: { out: '', err: '' }, flushTimer: null, waitTimer: null, tail: '' };
+  const p = { child, harness: h, rpc, buf: { out: '', err: '' }, flushTimer: null, waitTimer: null, tail: '' };
   procs.set(s.id, p);
-  setState(s, 'running');
+  if (!rpc) setState(s, 'running');
 
   const flush = () => {
     p.flushTimer = null;
@@ -593,6 +757,7 @@ function startProcess(s, harness, prompt) {
       pushEvent(s, { kind, text });
       p.tail = (p.tail + stripAnsi(text)).slice(-400);
     }
+    if (rpc) return;
     if (s.state === 'waiting') setState(s, 'running');
     clearTimeout(p.waitTimer);
     p.waitTimer = setTimeout(() => {
@@ -616,7 +781,23 @@ function startProcess(s, harness, prompt) {
     const kept = lines.filter((l) => !noise(l));
     if (kept.length) onData('err')(kept.join('\n') + '\n');
   };
-  child.stdout.on('data', onData('out'));
+  if (rpc) {
+    const onRecord = piRecordHandler(s, p);
+    let line = '';
+    child.stdout.on('data', (chunk) => {
+      const parts = (line + chunk.toString('utf8')).split('\n');
+      line = parts.pop();
+      for (const raw of parts) {
+        const text = raw.replace(/\r$/, '');
+        if (!text.trim()) continue;
+        let o;
+        try { o = JSON.parse(text); } catch { onData('out')(text + '\n'); continue; }
+        try { onRecord(o); } catch (e) { pushEvent(s, { kind: 'err', text: `Could not handle a pi event: ${e.message}\n` }); }
+      }
+    });
+  } else {
+    child.stdout.on('data', onData('out'));
+  }
   child.stderr.on('data', onErr);
   child.stdin?.on('error', () => {});
   let done = false;
@@ -628,8 +809,9 @@ function startProcess(s, harness, prompt) {
     clearTimeout(p.flushTimer);
     flush();
     clearTimeout(p.waitTimer);
+    if (p.streamFlush) p.streamFlush();
     if (procs.get(s.id) === p) procs.delete(s.id);
-    const text = failure ? `Failed to start ${h.command}: ${failure}` : signal ? `Stopped (${signal})` : `Exited with code ${code}`;
+    const text = failure ? `Failed to start ${h.command}: ${failure}` : p.stopped || signal ? 'Stopped' : `Exited with code ${code}`;
     pushEvent(s, { kind: 'exit', code: failure ? -1 : code ?? null, text });
     setState(s, interactive ? 'exited' : 'idle');
   };
@@ -645,6 +827,16 @@ function sendToSession(s, text) {
   const h = harnessList().find((x) => x.id === s.harness);
   if (!h) throw new Error(`Harness ${s.harness} is no longer configured`);
   const running = procs.get(s.id);
+  if (h.mode === 'rpc') {
+    const p = running || startProcess(s, h, null);
+    if (!p) return;
+    const busy = s.state === 'running' || s.state === 'waiting';
+    pushEvent(s, busy ? { kind: 'user', text, steer: true } : { kind: 'user', text });
+    rpcWrite(p, busy ? { type: 'prompt', message: text, streamingBehavior: 'steer' } : { type: 'prompt', message: text });
+    if (!busy) setState(s, 'running');
+    s.turns++;
+    return;
+  }
   if (h.mode === 'interactive') {
     pushEvent(s, { kind: 'user', text });
     let p = running;
@@ -675,6 +867,11 @@ function writeRaw(s, data) {
 function stopSession(s, signal = 'SIGINT') {
   const p = procs.get(s.id);
   if (!p) return;
+  if (p.rpc && signal === 'SIGINT') {
+    rpcWrite(p, { type: 'abort' });
+    return;
+  }
+  p.stopped = true;
   const kill = (sig) => {
     if (IS_WIN) {
       spawn('taskkill', ['/pid', String(p.child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => p.child.kill());
@@ -812,7 +1009,7 @@ function sortedSummaries() {
 
 function hello() {
   return {
-    t: 'hello', protocol: PROTOCOL, version: VERSION, host: os.hostname(), platform: process.platform,
+    t: 'hello', protocol: PROTOCOL, version: VERSION, host: os.hostname(), platform: process.platform, now: Date.now(),
     roots: realRoots(), harnesses: harnessList().map(publicHarness), sessions: sortedSummaries(),
   };
 }
@@ -856,6 +1053,7 @@ async function handle(c, raw) {
         return reply({ t: 'ok' });
       }
       case 'stdin': writeRaw(need(msg.id), String(msg.data ?? '')); return reply({ t: 'ok' });
+      case 'answer': answerAsk(need(msg.id), String(msg.askId), msg); return reply({ t: 'ok' });
       case 'stop': stopSession(need(msg.id), msg.signal === 'SIGTERM' ? 'SIGTERM' : 'SIGINT'); return reply({ t: 'ok' });
       case 'restart': {
         const s = need(msg.id);
@@ -1009,7 +1207,7 @@ function shutdown() {
   for (const s of sessions.values()) stopSession(s, 'SIGTERM');
   clearTimeout(saveTimer);
   saveTimer = null;
-  const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
+  const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, permissions, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, permissions, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
   try { saveJson(sessionsPath, data, 0o600); } catch {}
   process.exit(0);
 }

@@ -91,7 +91,7 @@ Most presets can run on either model server. You pick a model from the LM Studio
 
 | id | Runs | LM Studio | Ollama |
 |---|---|---|---|
-| `pi` | `pi --print --session-id harness-remote-<id> … -- <prompt>` | `--provider lmstudio --model <id>` | `--provider ollama --model <tag>` |
+| `pi` | `pi --mode rpc --session-id harness-remote-<id> -e pi-permissions.ts`, one long-lived process per session | `--provider lmstudio --model <id>` | `--provider ollama --model <tag>` |
 | `aider` | `aider --message …` (+ `--restore-chat-history`) | `--model lm_studio/<id>`, `LM_STUDIO_API_BASE` | `--model ollama_chat/<tag>`, `OLLAMA_API_BASE` |
 | `opencode` | `opencode run …` (+ `--continue`) | `--model lmstudio/<id>` | `--model ollama/<tag>` |
 | `codex` | `codex exec --oss --local-provider <server> --sandbox workspace-write …` (+ `resume --last`) | `-m <id>` | `-m <tag>` |
@@ -102,7 +102,15 @@ Most presets can run on either model server. You pick a model from the LM Studio
 
 Presets whose command isn't installed show up greyed out in the app, with the reason.
 
-- **Pi** only uses models listed in `~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR`). When you start a pi session, the bridge adds the model you picked under an `lmstudio` or `ollama` provider if it isn't there yet. It never removes or rewrites anything else, and leaves a file that isn't plain JSON untouched. Each phone session maps to its own pi session (`--session-id`), so two sessions in one folder don't share history.
+- **Pi** runs in RPC mode, so the app shows everything as it happens, the way Claude Code does:
+  - streamed thinking (tap to expand)
+  - each tool call (`⏺ Bash(npm test)`), with a short result preview (`⎿ …`, tap to expand)
+  - the reply as it's written
+  - a live "✻ Running Bash… (12s)" line
+
+  Sending a message while pi works **steers** it: pi reads it after the current step. Stop aborts cleanly.
+- **Permissions (pi):** the bridge installs a small pi extension (`~/.harness-remote/pi-permissions.ts`). Before pi runs any tool that isn't read-only (bash, edit, write, MCP tools without a read-only hint), you get a card on the phone, plus a notification if the app is in the background, with **Yes / Yes, and don't ask again for this tool this session / No**. "No" blocks the call, and pi is told you declined. Turn it off per session with "Ask before commands and edits" when creating the session. Read, grep, find and ls never ask. Other harnesses run with their own auto-approve flags (`--yes-always`, `--sandbox workspace-write`, `--permission-mode acceptEdits`), so they never stop to ask.
+- **Pi models:** pi only uses models listed in `~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR`). When you start a pi session, the bridge adds the model you picked under an `lmstudio` or `ollama` provider if it isn't there yet. It never removes or rewrites anything else, and leaves a file that isn't plain JSON untouched. Each phone session maps to its own pi session (`--session-id`), so two sessions in one folder don't share history.
 - **OpenCode** needs an `lmstudio` / `ollama` provider block in `opencode.json` ([docs](https://opencode.ai/docs/providers/)).
 - Local models usually need a bigger context window than the default for agent work. In LM Studio, raise the context length when loading the model. For Ollama, set `OLLAMA_CONTEXT_LENGTH` (for example 32768).
 
@@ -176,9 +184,12 @@ JSON over a WebSocket at `/ws` (`Authorization: Bearer <token>`). Requests carry
 | `models` | `{t:"models", lmstudio[], ollama[], errors{}, lms}` |
 | `lms-start` | runs `lms server start`, then replies like `models` |
 | `ls {path}` | `{t:"ls", path, parent, dirs[], git}` |
-| `create {harness, cwd, model, provider, title}` | `{t:"created", session}` |
+| `create {harness, cwd, model, provider, title, permissions: "ask"\|"auto"}` | `{t:"created", session}` |
 | `subscribe {id, after}` | `{t:"history", events[]}`, then live `{t:"event", id, ev}` |
 | `send {id, text}` · `stdin {id, data}` · `stop {id}` · `restart {id}` · `rename {id, title}` · `delete {id}` | `{t:"ok"}` or `{t:"error", error}` |
+| `answer {id, askId, value \| confirmed \| cancelled}` | answers a permission or question card (`ask` event) |
+
+Event kinds: `user`, `out`, `err`, `status`, `exit`, plus, for RPC harnesses, `think`, `text`, `tool {toolId, tool}`, `toolres {toolId, isError, durationMs}`, `ask {askId, method, options}` and `answer {askId}`.
 
 The bridge also pushes `{t:"sessions", sessions[]}` whenever any session changes state (`idle` / `running` / `waiting` / `exited`). HTTP: `GET /health`, `POST /pair {code}`.
 

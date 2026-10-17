@@ -30,6 +30,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -70,6 +72,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
     var startingLms by remember { mutableStateOf(false) }
     var listing by remember { mutableStateOf<DirListing?>(null) }
     var title by remember { mutableStateOf("") }
+    var askPermission by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
@@ -194,6 +197,24 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                 )
             }
 
+            if (harness?.mode == "rpc") {
+                Section("Permissions")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Ask before commands and edits", color = OffWhite, fontSize = 14.sp)
+                        Text(
+                            if (askPermission) "You approve each bash, write and edit call from the phone. Reads and searches run without asking."
+                            else "Everything runs without asking, like pi does on its own.",
+                            color = Gray, fontSize = 12.sp,
+                        )
+                    }
+                    Switch(
+                        checked = askPermission, onCheckedChange = { askPermission = it },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Red, checkedThumbColor = OffWhite),
+                    )
+                }
+            }
+
             Section("Project folder")
             listing?.let { l ->
                 Text(l.path + if (l.git) "  (git)" else "", fontFamily = Mono, fontSize = 12.sp, color = OffWhite)
@@ -225,7 +246,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     error = null
                     scope.launch {
                         try {
-                            val s = client.create(h.id, dir, if (h.models != null) model else "", if (h.models != null) provider else "", title)
+                            val s = client.create(h.id, dir, if (h.models != null) model else "", if (h.models != null) provider else "", title, askPermission)
                             hub.route.value = Route.Session(s.id)
                         } catch (e: Exception) {
                             error = e.message

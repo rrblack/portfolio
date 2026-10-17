@@ -48,6 +48,7 @@ data class Hello(
     val platform: String,
     val roots: List<String>,
     val harnesses: List<HarnessInfo>,
+    val now: Long,
 )
 
 data class SessionSummary(
@@ -57,10 +58,12 @@ data class SessionSummary(
     val cwd: String,
     val model: String,
     val provider: String,
+    val permissions: String,
     val createdAt: Long,
     val updatedAt: Long,
     val turns: Int,
     val state: String,
+    val runningSince: Long,
     val seq: Long,
     val preview: String,
 ) {
@@ -73,6 +76,16 @@ data class BridgeEvent(
     val kind: String,
     val text: String,
     val code: Int?,
+    val tool: String = "",
+    val toolId: String = "",
+    val isError: Boolean = false,
+    val durationMs: Long = 0,
+    val askId: String = "",
+    val method: String = "",
+    val message: String = "",
+    val options: List<String> = emptyList(),
+    val placeholder: String = "",
+    val steer: Boolean = false,
 )
 
 data class ModelInfo(val provider: String, val name: String, val params: String)
@@ -131,6 +144,7 @@ fun parseHello(o: JSONObject) = Hello(
     platform = o.str("platform"),
     roots = o.optJSONArray("roots").strings(),
     harnesses = o.optJSONArray("harnesses").mapObjects(::parseHarness),
+    now = o.optLong("now"),
 )
 
 fun parseSession(o: JSONObject) = SessionSummary(
@@ -140,10 +154,12 @@ fun parseSession(o: JSONObject) = SessionSummary(
     cwd = o.str("cwd"),
     model = o.str("model"),
     provider = o.str("provider"),
+    permissions = o.str("permissions"),
     createdAt = o.optLong("createdAt"),
     updatedAt = o.optLong("updatedAt"),
     turns = o.optInt("turns"),
     state = o.str("state"),
+    runningSince = o.optLong("runningSince"),
     seq = o.optLong("seq"),
     preview = o.str("preview"),
 )
@@ -156,6 +172,16 @@ fun parseEvent(o: JSONObject) = BridgeEvent(
     kind = o.str("kind"),
     text = o.str("text"),
     code = if (o.has("code") && !o.isNull("code")) o.optInt("code") else null,
+    tool = o.str("tool"),
+    toolId = o.str("toolId"),
+    isError = o.optBoolean("isError"),
+    durationMs = o.optLong("durationMs"),
+    askId = o.str("askId"),
+    method = o.str("method"),
+    message = o.str("message"),
+    options = o.optJSONArray("options").strings(),
+    placeholder = o.str("placeholder"),
+    steer = o.optBoolean("steer"),
 )
 
 fun parseEvents(a: JSONArray?) = a.mapObjects(::parseEvent)
