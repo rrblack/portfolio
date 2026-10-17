@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 1024 * 1024;
@@ -971,9 +971,22 @@ server.listen(port, host, () => {
   console.log('Leave this window open while you use the app. Press Ctrl+C to stop.\n');
 });
 
-server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') console.error(`Port ${port} is already in use. Is another bridge already running? Close it, or start with --port ${port + 1}`);
-  else if (e.code === 'EACCES') console.error(`Not allowed to listen on port ${port}. Try --port 8787 or higher.`);
+server.on('error', async (e) => {
+  if (e.code === 'EADDRINUSE') {
+    const other = await fetchJson(`http://127.0.0.1:${port}/health`).catch(() => null);
+    if (other && other.name === 'harness-bridge') {
+      console.error(`A Harness Bridge (${other.version}) is already running on port ${port}, so you don't need a second one.`);
+      console.error('Use the window it is running in. For a new pairing code, stop that one with Ctrl+C and start it again.');
+      if (other.version !== VERSION) console.error(`Note: that one is version ${other.version}; this file is ${VERSION}. Restart it to pick up the update.`);
+    } else {
+      console.error(`Port ${port} is already used by another program${port === 8787 ? ' (Cloudflare\'s "wrangler dev" uses 8787 by default)' : ''}.`);
+      console.error(IS_WIN
+        ? `  See which program:  Get-Process -Id (Get-NetTCPConnection -LocalPort ${port} -State Listen).OwningProcess`
+        : `  See which program:  lsof -iTCP:${port} -sTCP:LISTEN`);
+      console.error(`  Or use another port:  node harness-bridge.mjs --port ${port + 1}   and put :${port + 1} after the address on your phone.`);
+      console.error(`  To keep that port, set "port": ${port + 1} in ${configPath}`);
+    }
+  } else if (e.code === 'EACCES') console.error(`Not allowed to listen on port ${port}. Try --port 8787 or higher.`);
   else console.error(`Server error: ${e.message}`);
   process.exit(1);
 });
