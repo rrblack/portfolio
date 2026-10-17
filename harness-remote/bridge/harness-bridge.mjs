@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 1024 * 1024;
@@ -19,7 +19,13 @@ const MAX_PROMPT = 100 * 1024;
 const MAX_EVENTS = 4000;
 const FLUSH_MS = 80;
 const WAITING_MS = 1500;
+const IS_WIN = process.platform === 'win32';
 const WAITING_RE = /(\?|\[y\/n\]|\(y\/n\)|\(yes\/no\)|:|>|›|❯|\$|#)\s*$/i;
+
+if (Number(process.versions.node.split('.')[0]) < 18) {
+  console.error(`Harness Bridge needs Node.js 18 or newer. You have ${process.version}. Download it from https://nodejs.org`);
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------- arguments
 
@@ -65,19 +71,28 @@ if (!config.token || argv.includes('--rotate-token')) {
   config.token = crypto.randomBytes(24).toString('base64url');
   configDirty = true;
 }
-config.port ??= 8787;
-config.host ??= '0.0.0.0';
-config.roots ??= [os.homedir()];
-config.ollama ??= process.env.OLLAMA_HOST ? normalizeUrl(process.env.OLLAMA_HOST) : 'http://127.0.0.1:11434';
-config.lmstudio ??= 'http://127.0.0.1:1234';
-config.harnesses ??= [];
+if (config.port == null) config.port = 8787;
+if (config.host == null) config.host = '0.0.0.0';
+if (config.roots == null) config.roots = [os.homedir()];
+if (config.ollama == null) config.ollama = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
+if (config.lmstudio == null) config.lmstudio = 'http://127.0.0.1:1234';
+if (config.harnesses == null) config.harnesses = [];
 if (configDirty) saveJson(configPath, config, 0o600);
+config.ollama = localUrl(config.ollama, 11434);
+config.lmstudio = localUrl(config.lmstudio, 1234);
 
 const port = Number(flag('--port') || config.port);
 const host = String(flag('--host') || config.host);
 
-function normalizeUrl(u) {
-  return /^https?:\/\//.test(u) ? u.replace(/\/$/, '') : `http://${u.replace(/\/$/, '')}`;
+function localUrl(value, defaultPort) {
+  try {
+    const u = new URL(/^https?:\/\//.test(value) ? value : `http://${value}`);
+    if (u.hostname === '0.0.0.0' || u.hostname === '[::]') u.hostname = '127.0.0.1';
+    if (!u.port && u.protocol === 'http:' && !/:\d+/.test(value)) u.port = String(defaultPort);
+    return u.origin;
+  } catch {
+    return `http://127.0.0.1:${defaultPort}`;
+  }
 }
 
 // ---------------------------------------------------------------- harness presets
@@ -179,17 +194,48 @@ function harnessList() {
 const whichCache = new Map();
 function which(cmd) {
   if (whichCache.has(cmd)) return whichCache.get(cmd);
+  const pathext = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').toLowerCase().split(';').filter(Boolean);
+  const exts = IS_WIN && !pathext.includes(path.extname(cmd).toLowerCase()) ? pathext : [''];
+  const isFile = (p) => { try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; } };
   let found = null;
-  if (cmd.includes('/')) {
-    try { fs.accessSync(cmd, fs.constants.X_OK); found = cmd; } catch {}
+  if (cmd.includes('/') || (IS_WIN && cmd.includes('\\'))) {
+    found = exts.map((e) => cmd + e).find(isFile) || null;
   } else {
     for (const dir of (process.env.PATH || '').split(path.delimiter)) {
-      const p = path.join(dir, cmd);
-      try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) { found = p; break; } } catch {}
+      if (!dir) continue;
+      found = exts.map((e) => path.join(dir, cmd + e)).find(isFile) || null;
+      if (found) break;
     }
   }
   whichCache.set(cmd, found);
   return found;
+}
+
+// Windows: npm installs CLIs as .cmd shims. Running those needs cmd.exe, which can't safely carry
+// arbitrary prompt text, so run the script the shim points at with node (or the .exe) directly.
+function shimTarget(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  const m = [...text.matchAll(/"%~?dp0%?\\?([^"%]+)"\s+%\*/gi)].pop();
+  if (!m) return null;
+  const target = path.join(path.dirname(file), m[1]);
+  return fs.existsSync(target) ? target : null;
+}
+
+function resolveLaunch(file, args) {
+  if (!IS_WIN || !/\.(cmd|bat)$/i.test(file)) return [file, args];
+  const target = shimTarget(file);
+  if (!target) throw new Error(`${path.basename(file)} is a batch file the bridge can't run safely. Set "command" to the .exe or .js it launches.`);
+  if (/\.exe$/i.test(target)) return [target, args];
+  return [process.execPath, [target, ...args]];
+}
+
+function unavailableReason(h) {
+  const file = which(h.command);
+  if (!file) return `${h.command} was not found on PATH`;
+  if (h.pty && IS_WIN) return 'Needs a terminal (PTY), which the bridge does not support on Windows yet';
+  try { resolveLaunch(file, []); } catch (e) { return e.message; }
+  return null;
 }
 
 function publicHarness(h) {
@@ -200,7 +246,8 @@ function publicHarness(h) {
     mode: h.mode === 'interactive' ? 'interactive' : 'turn',
     models: h.models || null,
     requiresModel: !!h.requiresModel,
-    available: !!which(h.command),
+    available: !unavailableReason(h),
+    reason: unavailableReason(h),
     command: h.command,
   };
 }
@@ -233,7 +280,7 @@ function buildEnv(h, vars) {
   for (const [k, v] of Object.entries(h.env || {})) env[k] = fill(v, vars);
   if (vars.model) for (const [k, v] of Object.entries(h.modelEnv || {})) env[k] = fill(v, vars);
   for (const [k, v] of Object.entries(env)) if (v === '') delete env[k];
-  env.NO_COLOR ??= '1';
+  if (env.NO_COLOR == null) env.NO_COLOR = '1';
   env.FORCE_COLOR = '0';
   return env;
 }
@@ -251,15 +298,19 @@ function wrapPty(cmd, args) {
 
 // ---------------------------------------------------------------- paths
 
+const realpath = (p) => (IS_WIN ? fs.realpathSync.native(p) : fs.realpathSync(p));
+const samePath = (p) => (IS_WIN ? p.toLowerCase() : p);
+
 function realRoots() {
-  return config.roots.map((r) => { try { return fs.realpathSync(r.replace(/^~(?=$|\/)/, os.homedir())); } catch { return null; } }).filter(Boolean);
+  return config.roots.map((r) => { try { return realpath(r.replace(/^~(?=$|[\\/])/, os.homedir())); } catch { return null; } }).filter(Boolean);
 }
 
 function insideRoots(p) {
   let real;
-  try { real = fs.realpathSync(p); } catch { return null; }
+  try { real = realpath(p); } catch { return null; }
   for (const root of realRoots()) {
-    if (real === root || real.startsWith(root.endsWith(path.sep) ? root : root + path.sep)) return real;
+    const r = samePath(root.endsWith(path.sep) ? root : root + path.sep);
+    if (samePath(real) === samePath(root) || samePath(real).startsWith(r)) return real;
   }
   return null;
 }
@@ -273,7 +324,7 @@ function listDir(p) {
     .map((e) => e.name)
     .sort((a, b) => a.localeCompare(b))
     .slice(0, 500);
-  const isRoot = realRoots().includes(dir);
+  const isRoot = realRoots().some((r) => samePath(r) === samePath(dir));
   return { path: dir, parent: isRoot ? null : path.dirname(dir), dirs: entries, git: fs.existsSync(path.join(dir, '.git')) };
 }
 
@@ -314,8 +365,8 @@ const sessions = new Map();
 for (const s of loadJson(sessionsPath, [])) {
   if (!s || !s.id) continue;
   s.state = s.state === 'running' || s.state === 'waiting' ? 'idle' : s.state || 'idle';
-  s.events ||= [];
-  s.seq ||= s.events.length ? s.events[s.events.length - 1].seq : 0;
+  if (!s.events) s.events = [];
+  if (!s.seq) s.seq = s.events.length ? s.events[s.events.length - 1].seq : 0;
   sessions.set(s.id, s);
 }
 const procs = new Map();
@@ -364,7 +415,8 @@ function setState(s, state) {
 function createSession({ harness, cwd, model, title }) {
   const h = harnessList().find((x) => x.id === harness);
   if (!h) throw new Error(`Unknown harness: ${harness}`);
-  if (!which(h.command)) throw new Error(`${h.command} is not installed or not on PATH`);
+  const reason = unavailableReason(h);
+  if (reason) throw new Error(`${h.name || h.id}: ${reason}`);
   if (h.requiresModel && !model) throw new Error(`${h.name || h.id} needs a model`);
   const dir = insideRoots(cwd || realRoots()[0] || os.homedir());
   if (!dir || !safeIsDir(dir)) throw new Error('Working directory is missing or outside the allowed roots');
@@ -388,6 +440,13 @@ function startProcess(s, h, prompt) {
   let cmd = which(h.command) || h.command;
   let args = buildArgs(template, h, vars);
   if (h.pty) [cmd, args] = wrapPty(cmd, args);
+  try {
+    [cmd, args] = resolveLaunch(cmd, args);
+  } catch (e) {
+    pushEvent(s, { kind: 'exit', code: -1, text: e.message });
+    setState(s, h.mode === 'interactive' ? 'exited' : 'idle');
+    return null;
+  }
   const interactive = h.mode === 'interactive';
   const stdinMode = h.stdin || (interactive || h.pty ? 'pipe' : 'ignore');
   const env = buildEnv(h, vars);
@@ -395,7 +454,7 @@ function startProcess(s, h, prompt) {
 
   let child;
   try {
-    child = spawn(cmd, args, { cwd: s.cwd, env, stdio: [stdinMode, 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    child = spawn(cmd, args, { cwd: s.cwd, env, stdio: [stdinMode, 'pipe', 'pipe'], detached: !IS_WIN, windowsHide: true });
   } catch (e) {
     pushEvent(s, { kind: 'err', text: `Failed to start ${h.command}: ${e.message}\n` });
     setState(s, 'idle');
@@ -485,10 +544,11 @@ function stopSession(s, signal = 'SIGINT') {
   const p = procs.get(s.id);
   if (!p) return;
   const kill = (sig) => {
-    try {
-      if (process.platform !== 'win32') process.kill(-p.child.pid, sig);
-      else p.child.kill(sig);
-    } catch { try { p.child.kill(sig); } catch {} }
+    if (IS_WIN) {
+      spawn('taskkill', ['/pid', String(p.child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => p.child.kill());
+      return;
+    }
+    try { process.kill(-p.child.pid, sig); } catch { try { p.child.kill(sig); } catch {} }
   };
   kill(signal);
   setTimeout(() => { if (procs.get(s.id) === p) kill('SIGTERM'); }, 3000);
@@ -775,7 +835,9 @@ server.listen(port, host, () => {
   console.log(`\nHarness Bridge ${VERSION} listening on ${scheme}://${host}:${port}`);
   console.log(`Config: ${configPath}`);
   console.log(`Allowed roots: ${realRoots().join(', ')}`);
-  console.log(`Harnesses: ${harnesses.map((h) => `${h.name}${h.available ? '' : ' (not installed)'}`).join(', ')}`);
+  console.log('Harnesses:');
+  for (const h of harnesses) console.log(`  ${h.available ? '✓' : '✗'} ${h.name}${h.available ? '' : `  (${h.reason})`}`);
+  if (!harnesses.some((h) => h.available)) console.log('  None of the harnesses are usable yet. Install one (e.g. `pip install aider-chat` or `npm i -g opencode-ai`) and restart.');
   if (host === '0.0.0.0' || host === '::') {
     console.log('\nReachable at:');
     for (const a of addrs) console.log(`  ${scheme}://${a.address}:${port}  (${a.name}${a.tailscale ? ', Tailscale' : ''})`);
@@ -783,10 +845,14 @@ server.listen(port, host, () => {
   console.log(`\nPairing code: ${pairing.code}   (valid 10 minutes, one use)`);
   console.log('Open Harness Remote on your phone → Add computer → enter the address and this code.\n');
   if (!tls) console.log('Traffic is not encrypted. Use Tailscale/WireGuard or set "tls" in the config when off your home network.\n');
+  if (IS_WIN) console.log('Windows: if the phone cannot connect, allow Node.js through Windows Defender Firewall for Private networks and make sure your Wi-Fi is set to Private.\n');
+  console.log('Leave this window open while you use the app. Press Ctrl+C to stop.\n');
 });
 
 server.on('error', (e) => {
-  console.error(`Server error: ${e.message}`);
+  if (e.code === 'EADDRINUSE') console.error(`Port ${port} is already in use. Is another bridge already running? Close it, or start with --port ${port + 1}`);
+  else if (e.code === 'EACCES') console.error(`Not allowed to listen on port ${port}. Try --port 8787 or higher.`);
+  else console.error(`Server error: ${e.message}`);
   process.exit(1);
 });
 

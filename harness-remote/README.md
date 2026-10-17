@@ -31,19 +31,23 @@ Harness Remote is a small open option: one dependency-free Node script on the co
 
 ## Quick start
 
-### 1. Computer (Linux or macOS; Windows via WSL)
+### 1. Computer (Windows, macOS or Linux)
 
-Requires Node.js 18+ and at least one harness on your `PATH`.
+Requires Node.js 18+ ([nodejs.org](https://nodejs.org), LTS) and at least one harness on your `PATH`.
 
-```bash
-node harness-remote/bridge/harness-bridge.mjs
-```
+- **Windows:** double-click `bridge/start-bridge.cmd`, or open a terminal in the folder that contains `harness-bridge.mjs` and run `node harness-bridge.mjs`.
+- **macOS / Linux:** `node harness-remote/bridge/harness-bridge.mjs`
+
+Leave the window open while you use the app. The bridge is a server: after the startup text it just waits for your phone.
 
 It prints something like:
 
 ```
-Harness Bridge 0.1.0 listening on http://0.0.0.0:8787
-Harnesses: Aider, OpenCode, Goose (not installed), Codex (local OSS), Claude Code (Ollama), Ollama chat
+Harness Bridge 0.1.1 listening on http://0.0.0.0:8787
+Harnesses:
+  ✓ Aider
+  ✓ OpenCode
+  ✗ Goose  (goose was not found on PATH)
 Reachable at:
   http://192.168.1.20:8787  (wlan0)
   http://100.88.12.4:8787   (tailscale0, Tailscale)
@@ -160,4 +164,17 @@ The bridge also pushes `{t:"sessions", sessions[]}` whenever any session changes
 - Output is shown as cleaned text (ANSI stripped, `\r` progress lines collapsed), not as a full terminal emulator. Full-screen TUIs in interactive mode are usable but not pretty. The per-message presets are the intended way to work.
 - "Needs input" is a heuristic: output went quiet for 1.5 s and the last line looks like a prompt.
 - OpenCode's `--continue` and Codex's `resume --last` pick the most recent session *in that folder*. Two phone sessions on the same folder with the same harness will share history.
-- Native Windows isn't supported yet (npm `.cmd` shims need a shell). Use WSL.
+- On Windows, the PTY-based presets (`ollama-chat`, `shell`) are unavailable. Per-message harnesses work. npm-installed CLIs (`.cmd` shims) are started through the script they wrap, so prompt text never passes through `cmd.exe`. Other `.bat`/`.cmd` files are refused: point `command` at the real `.exe` or `.js` instead.
+
+## Troubleshooting
+
+| You see | Fix |
+|---|---|
+| `'node' is not recognized` / `command not found: node` | Install Node.js LTS from nodejs.org, then open a **new** terminal. |
+| `Cannot find module …harness-bridge.mjs` | You're in the wrong folder. `cd` to where the file is (e.g. `cd Downloads`) or pass the full path. |
+| `SyntaxError` right at startup, or "needs Node.js 18" | Your Node is too old. Install the current LTS. |
+| `Port 8787 is already in use` | A bridge is already running (check other windows), or start with `--port 8788` and use that port on the phone. |
+| Every harness shows ✗ | None are installed or on `PATH` in that terminal. Install one, open a new terminal, and run the bridge again. |
+| Bridge runs but the phone can't connect | Phone and computer must be on the same Wi-Fi (or both on Tailscale). Use an address from the "Reachable at" list, not `0.0.0.0`. On Windows, allow Node.js through Windows Defender Firewall for **Private** networks and set the Wi-Fi network to Private. |
+| "Pairing code expired" | Codes last 10 minutes and work once. Restart the bridge for a new one. |
+| Models list is empty | Ollama isn't running, or isn't on `127.0.0.1:11434`. Set `"ollama"` in the config. `OLLAMA_HOST=0.0.0.0` is handled. |

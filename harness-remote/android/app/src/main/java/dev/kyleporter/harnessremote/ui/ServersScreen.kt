@@ -86,7 +86,7 @@ fun ServersScreen(hub: Hub) {
                 Text("Control your agent harnesses from here", fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "1. On your computer run:\n    node harness-bridge.mjs\n\n" +
+                    "1. On your computer run:\n    node harness-bridge.mjs\n   (Windows: double-click start-bridge.cmd)\n\n" +
                         "2. Tap Add computer and enter the address and 6-digit pairing code it prints.\n\n" +
                         "Away from home? Put both devices on Tailscale and use the computer's 100.x address.",
                     color = Gray,

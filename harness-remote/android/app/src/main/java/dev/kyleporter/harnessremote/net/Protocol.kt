@@ -38,6 +38,7 @@ data class HarnessInfo(
     val models: String?,
     val requiresModel: Boolean,
     val available: Boolean,
+    val reason: String?,
     val command: String,
 )
 
@@ -77,6 +78,14 @@ data class ModelInfo(val provider: String, val name: String, val params: String)
 
 data class DirListing(val path: String, val parent: String?, val dirs: List<String>, val git: Boolean)
 
+fun baseName(path: String): String =
+    path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\').ifBlank { path }
+
+fun childPath(dir: String, name: String): String {
+    val sep = if ('\\' in dir && '/' !in dir) "\\" else "/"
+    return dir.trimEnd('/', '\\') + sep + name
+}
+
 fun JSONObject.str(key: String): String = if (isNull(key)) "" else optString(key, "")
 
 fun JSONObject.strOrNull(key: String): String? = if (isNull(key)) null else optString(key)
@@ -99,6 +108,7 @@ fun parseHarness(o: JSONObject) = HarnessInfo(
     models = o.strOrNull("models"),
     requiresModel = o.optBoolean("requiresModel"),
     available = o.optBoolean("available"),
+    reason = o.strOrNull("reason"),
     command = o.str("command"),
 )
 

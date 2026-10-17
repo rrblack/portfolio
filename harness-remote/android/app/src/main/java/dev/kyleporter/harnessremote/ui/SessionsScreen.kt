@@ -43,6 +43,7 @@ import dev.kyleporter.harnessremote.Hub
 import dev.kyleporter.harnessremote.Route
 import dev.kyleporter.harnessremote.net.BridgeClient
 import dev.kyleporter.harnessremote.net.ConnState
+import dev.kyleporter.harnessremote.net.baseName
 import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
@@ -105,7 +106,7 @@ fun SessionsScreen(hub: Hub, client: BridgeClient) {
                 hello?.let { h ->
                     Spacer(Modifier.height(16.dp))
                     Text(
-                        h.harnesses.joinToString("\n") { "${if (it.available) "●" else "○"} ${it.name}${if (it.available) "" else "  (not installed)"}" },
+                        h.harnesses.joinToString("\n") { "${if (it.available) "●" else "○"} ${it.name}${if (it.available) "" else "  (${it.reason ?: "not installed"})"}" },
                         fontFamily = Mono, fontSize = 13.sp, color = Gray,
                     )
                 }
@@ -127,7 +128,7 @@ fun SessionsScreen(hub: Hub, client: BridgeClient) {
                             }
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                listOfNotNull(harnessNames[s.harness] ?: s.harness, s.model.ifBlank { null }, s.cwd.substringAfterLast('/'))
+                                listOfNotNull(harnessNames[s.harness] ?: s.harness, s.model.ifBlank { null }, baseName(s.cwd))
                                     .joinToString(" · "),
                                 color = Gray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )

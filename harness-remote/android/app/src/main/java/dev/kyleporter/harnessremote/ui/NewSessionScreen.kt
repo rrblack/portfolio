@@ -52,6 +52,8 @@ import dev.kyleporter.harnessremote.Route
 import dev.kyleporter.harnessremote.net.BridgeClient
 import dev.kyleporter.harnessremote.net.DirListing
 import dev.kyleporter.harnessremote.net.ModelInfo
+import dev.kyleporter.harnessremote.net.baseName
+import dev.kyleporter.harnessremote.net.childPath
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -123,7 +125,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                         if (selected) Icon(Icons.Filled.Check, null, tint = Red, modifier = Modifier.padding(start = 6.dp))
                     }
                     if (h.description.isNotBlank()) Text(h.description, color = Gray, fontSize = 12.sp)
-                    if (!h.available) Text("`${h.command}` not found on the computer's PATH", color = Red.copy(alpha = 0.8f), fontSize = 12.sp)
+                    if (!h.available) Text(h.reason ?: "`${h.command}` not found on the computer's PATH", color = Red.copy(alpha = 0.8f), fontSize = 12.sp)
                 }
             }
 
@@ -164,7 +166,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     l.parent?.let { parent ->
                         DirRow("..") { browse(parent) }
                     }
-                    l.dirs.forEach { d -> DirRow("$d/") { browse(l.path.trimEnd('/') + "/" + d) } }
+                    l.dirs.forEach { d -> DirRow("$d/") { browse(childPath(l.path, d)) } }
                     if (l.dirs.isEmpty() && l.parent == null) Text("Empty", Modifier.padding(12.dp), color = Gray)
                 }
             } ?: Text("Loading…", color = Gray)
@@ -194,7 +196,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                         }
                     }
                 },
-            ) { Text("Start in ${listing?.path?.substringAfterLast('/')?.ifBlank { "/" } ?: "…"}") }
+            ) { Text("Start in ${listing?.path?.let(::baseName) ?: "…"}") }
             TextButton(onClick = { hub.route.value = Route.Sessions }, modifier = Modifier.fillMaxWidth()) { Text("Cancel", color = Gray) }
         }
     }
