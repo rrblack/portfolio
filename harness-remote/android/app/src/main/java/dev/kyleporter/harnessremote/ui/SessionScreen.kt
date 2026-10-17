@@ -1,6 +1,9 @@
 package dev.kyleporter.harnessremote.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.ui.draw.rotate
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -105,11 +108,11 @@ import kotlinx.coroutines.launch
 
 private sealed interface Item {
     val key: String
-    data class User(override val key: String, val text: String, val steer: Boolean, val thumbs: List<String>) : Item
+    data class User(override val key: String, val text: String, val steer: Boolean, val queued: Boolean, val thumbs: List<String>) : Item
     data class Output(override val key: String, val text: String, val err: Boolean) : Item
     data class Note(override val key: String, val text: String, val bad: Boolean) : Item
-    data class Assistant(override val key: String, val text: String) : Item
-    data class Thinking(override val key: String, val text: String, val startTs: Long, val endTs: Long?) : Item
+    data class Assistant(override val key: String, val text: String, val ts: Long = 0) : Item
+    data class Thinking(override val key: String, val text: String, val startTs: Long, val endTs: Long?, val done: Boolean = endTs != null) : Item
     data class Tool(
         override val key: String,
         val toolId: String,
@@ -156,7 +159,7 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
     fun flush(nextTs: Long? = null) {
         if (buf.isEmpty()) return
         when (bufKind) {
-            "text" -> buf.toString().trim().takeIf { it.isNotEmpty() }?.let { out += Item.Assistant(bufKey, it) }
+            "text" -> buf.toString().trim().takeIf { it.isNotEmpty() }?.let { out += splitThinkTags(bufKey, it, bufTs) }
             "think" -> buf.toString().trim().takeIf { it.isNotEmpty() }?.let { out += Item.Thinking(bufKey, it, bufTs, nextTs) }
             else -> {
                 val text = cleanTerminal(buf.toString()).trimEnd('\n')
@@ -181,7 +184,7 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
                     bufKey = "$bufKind${e.seq}.${++part}"
                 }
             }
-            "user" -> { flush(); out += Item.User("u${e.seq}", e.text, e.steer, e.thumbs) }
+            "user" -> { flush(); out += Item.User("u${e.seq}", e.text, e.steer, e.queued, e.thumbs) }
             "tool" -> {
                 flush()
                 tools[e.toolId] = out.size
@@ -217,6 +220,41 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
         }
     }
     flush()
+    return out
+}
+
+private val thinkOpen = Regex("<(think|thinking|reasoning)>", RegexOption.IGNORE_CASE)
+private val thinkClose = Regex("</(think|thinking|reasoning)>", RegexOption.IGNORE_CASE)
+
+// Models whose server does not separate reasoning send it inline as <think>…</think>. Often the chat
+// template already opened the tag, so only </think> shows up and everything before it is reasoning.
+private fun splitThinkTags(key: String, text: String, ts: Long): List<Item> {
+    val firstOpen = thinkOpen.find(text)
+    val firstClose = thinkClose.find(text)
+    if (firstOpen == null && firstClose == null) return listOf(Item.Assistant(key, text, ts))
+    val out = ArrayList<Item>()
+    var rest = text
+    var n = 0
+    if (firstClose != null && (firstOpen == null || firstClose.range.first < firstOpen.range.first)) {
+        rest.substring(0, firstClose.range.first).trim().takeIf { it.isNotEmpty() }?.let { out += Item.Thinking("$key.k${n++}", it, ts, null, done = true) }
+        rest = rest.substring(firstClose.range.last + 1)
+    }
+    while (rest.isNotEmpty()) {
+        val open = thinkOpen.find(rest)
+        if (open == null) {
+            rest.trim().takeIf { it.isNotEmpty() }?.let { out += Item.Assistant("$key.a${n++}", it, ts) }
+            break
+        }
+        rest.substring(0, open.range.first).trim().takeIf { it.isNotEmpty() }?.let { out += Item.Assistant("$key.a${n++}", it, ts) }
+        rest = rest.substring(open.range.last + 1)
+        val close = thinkClose.find(rest)
+        if (close == null) {
+            out += Item.Thinking("$key.k${n++}", rest.trim(), ts, null, done = false)
+            break
+        }
+        rest.substring(0, close.range.first).trim().takeIf { it.isNotEmpty() }?.let { out += Item.Thinking("$key.k${n++}", it, ts, null, done = true) }
+        rest = rest.substring(close.range.last + 1)
+    }
     return out
 }
 
@@ -419,7 +457,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                             when {
                                 structured && session?.busy == true -> "Add a message: ${harness?.name} reads it after this step"
                                 session?.state == "waiting" -> "Answer the prompt…"
-                                session?.busy == true && !interactive -> "Busy · stop it to send a new message"
+                                session?.busy == true && !interactive -> "Queue a message for after this turn"
                                 else -> "Message ${harness?.name ?: "the harness"}"
                             },
                             color = Gray,
@@ -505,12 +543,13 @@ private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkin
                 )
             }
             if (item.steer) Text("sent mid-task · read after the current step", color = Gray, fontSize = 10.sp)
+            if (item.queued) Text("queued · runs when the current turn finishes", color = Gray, fontSize = 10.sp)
         }
         is Item.Assistant -> Row(Modifier.fillMaxWidth()) {
             Dot(OffWhite, Modifier.padding(top = 8.dp))
             SelectionContainer { MarkdownText(item.text) }
         }
-        is Item.Thinking -> ThinkingBlock(item, live = item.endTs == null && thinkingLive)
+        is Item.Thinking -> ThinkingBlock(item, live = !item.done && thinkingLive)
         is Item.Tool -> ToolBlock(item, progress)
         is Item.Ask -> AskCard(item, answerable, onAnswer)
         is Item.Output -> if (item.err) WarningBlock(item) else SelectionContainer {
@@ -533,7 +572,8 @@ private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkin
 private fun ThinkingBlock(item: Item.Thinking, live: Boolean) {
     var expanded by rememberSaveable(item.key) { mutableStateOf(false) }
     val seconds = item.endTs?.let { ((it - item.startTs) / 1000).coerceAtLeast(1) }
-    Column(Modifier.fillMaxWidth().clickable { expanded = !expanded }) {
+    val turn by animateFloatAsState(if (expanded) 90f else 0f, label = "chevron")
+    Column(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 2.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterStart) {
                 if (live) Spinner(Gray, 12.dp) else Text("✻", color = Gray, fontSize = 12.sp)
@@ -546,10 +586,15 @@ private fun ThinkingBlock(item: Item.Thinking, live: Boolean) {
                 },
                 color = Gray, fontSize = 13.sp, fontStyle = FontStyle.Italic,
             )
-            Text(if (expanded) "  · tap to hide" else "  · tap to show", color = Gray.copy(alpha = 0.6f), fontSize = 11.sp)
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight, if (expanded) "Hide thinking" else "Show thinking",
+                tint = Gray, modifier = Modifier.padding(start = 2.dp).size(18.dp).rotate(turn),
+            )
         }
         if (expanded) {
-            Text(item.text, Modifier.padding(start = 18.dp), color = Gray, fontSize = 13.sp, fontStyle = FontStyle.Italic, lineHeight = 18.sp)
+            SelectionContainer {
+                Text(item.text, Modifier.padding(start = 18.dp, top = 2.dp), color = Gray, fontSize = 13.sp, fontStyle = FontStyle.Italic, lineHeight = 18.sp)
+            }
         } else if (live) {
             Text(
                 item.text.trimEnd().lines().takeLast(2).joinToString("\n"),
@@ -704,7 +749,7 @@ private fun Dot(color: androidx.compose.ui.graphics.Color, modifier: Modifier = 
     }
 }
 
-private val VERBS = listOf("Thinking", "Working", "Pondering", "Cooking", "Brewing", "Crafting", "Tinkering", "Computing")
+private val VERBS = listOf("Working", "Pondering", "Cooking", "Brewing", "Crafting", "Tinkering", "Computing")
 
 @Composable
 fun Spinner(color: androidx.compose.ui.graphics.Color, size: Dp = 14.dp) {
@@ -749,15 +794,15 @@ private fun WorkingLine(waiting: Boolean, waitingOnCard: Boolean, activity: Stri
     val secs = if (startedAtLocal > 0) ((now - startedAtLocal) / 1000).coerceAtLeast(0) else -1
     val elapsed = when {
         secs < 0 -> ""
-        secs < 60 -> "${secs}s · "
-        else -> "${secs / 60}m ${(secs % 60).toString().padStart(2, '0')}s · "
+        secs < 60 -> "${secs}s"
+        else -> "${secs / 60}m ${(secs % 60).toString().padStart(2, '0')}s"
     }
     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterStart) { Spinner(Red, 13.dp) }
         Text(
             buildAnnotatedString {
                 withStyle(SpanStyle(color = Red.copy(alpha = shimmer), fontWeight = FontWeight.Medium)) { append("$verb…") }
-                withStyle(SpanStyle(color = Gray)) { append("  ($elapsed" + "tap ✕ to stop)") }
+                if (elapsed.isNotEmpty()) withStyle(SpanStyle(color = Gray)) { append("  ($elapsed)") }
             },
             fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
         )

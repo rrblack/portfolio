@@ -89,6 +89,7 @@ data class BridgeEvent(
     val options: List<String> = emptyList(),
     val placeholder: String = "",
     val steer: Boolean = false,
+    val queued: Boolean = false,
     val thumbs: List<String> = emptyList(),
     val parent: String = "",
 )
@@ -194,6 +195,7 @@ fun parseEvent(o: JSONObject) = BridgeEvent(
     options = o.optJSONArray("options").strings(),
     placeholder = o.str("placeholder"),
     steer = o.optBoolean("steer"),
+    queued = o.optBoolean("queued"),
     thumbs = o.optJSONArray("thumbs").strings(),
     parent = o.str("parent"),
 )

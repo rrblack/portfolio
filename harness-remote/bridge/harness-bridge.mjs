@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -848,6 +848,10 @@ function startProcess(s, harness, prompt) {
     const text = failure ? `Failed to start ${h.command}: ${failure}` : p.stopped || signal ? 'Stopped' : `Exited with code ${code}`;
     if (!p.quiet) pushEvent(s, { kind: 'exit', code: failure ? -1 : code ?? null, text });
     setState(s, interactive ? 'exited' : 'idle');
+    if (!interactive && !rpc && s.queue && s.queue.length && !p.stopped && sessions.has(s.id)) {
+      const next = s.queue.shift();
+      setImmediate(() => { if (!procs.get(s.id) && startProcess(s, harness, next)) s.turns++; });
+    }
   };
   child.on('error', (e) => {
     if (child.pid === undefined) finish(null, null, e.message);
@@ -906,7 +910,11 @@ function sendToSession(s, text, images = [], thumbs = []) {
       running.child.stdin.write(text + '\n');
       return;
     }
-    throw new Error('A turn is still running. Stop it first or wait for it to finish.');
+    // One process per message: hold it and start it when this turn ends, like Claude Code's queue.
+    if (!s.queue) s.queue = [];
+    s.queue.push(text);
+    pushEvent(s, userEvent({ queued: true }));
+    return;
   }
   pushEvent(s, userEvent({}));
   if (startProcess(s, h, text)) s.turns++;
@@ -957,6 +965,10 @@ function writeRaw(s, data) {
 }
 
 function stopSession(s, signal = 'SIGINT') {
+  if (s.queue && s.queue.length) {
+    pushEvent(s, { kind: 'status', text: `Cleared ${s.queue.length} queued message${s.queue.length === 1 ? '' : 's'}` });
+    s.queue = [];
+  }
   const p = procs.get(s.id);
   if (!p) return;
   if (p.rpc && signal === 'SIGINT') {
