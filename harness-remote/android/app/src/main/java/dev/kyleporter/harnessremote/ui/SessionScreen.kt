@@ -1,6 +1,17 @@
 package dev.kyleporter.harnessremote.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.ui.draw.rotate
@@ -82,7 +93,6 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -294,15 +304,30 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
         if (conn == ConnState.Connected) runCatching { client.subscribe(id) }.onFailure { error = it.message }
     }
 
-    val atBottom by remember {
-        derivedStateOf {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            last >= listState.layoutInfo.totalItemsCount - 3
+    // Follow mode keeps the newest output in view. Only the user dragging back through history turns it
+    // off; reaching the bottom, focusing the input, the keyboard opening or sending turns it back on.
+    var follow by rememberSaveable(id) { mutableStateOf(true) }
+    val followConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y > 0f) follow = false
+                return Offset.Zero
+            }
         }
     }
-    LaunchedEffect(events.size, showWorking, progress) {
-        val count = listState.layoutInfo.totalItemsCount
-        if (count > 0 && (atBottom || listState.firstVisibleItemIndex == 0)) listState.scrollToItem(count - 1, Int.MAX_VALUE / 2)
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.canScrollForward }.collect { if (!it) follow = true }
+    }
+    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
+    LaunchedEffect(imeBottom) { if (imeBottom > 0) follow = true }
+    val lastIndex = items.size - 1 + if (showWorking) 1 else 0
+    val growth = events.size + (items.lastOrNull()?.let { (it as? Item.Assistant)?.text?.length ?: (it as? Item.Thinking)?.text?.length ?: 0 } ?: 0) +
+        progress.values.sumOf { it.length }
+    LaunchedEffect(lastIndex, growth, follow, imeBottom) {
+        if (follow && lastIndex >= 0) {
+            listState.scrollToItem(lastIndex)
+            listState.scrollBy(100_000f)
+        }
     }
 
     fun act(block: suspend () -> Unit) {
@@ -361,8 +386,9 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
         },
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
-                Modifier.weight(1f).fillMaxWidth(),
+                Modifier.fillMaxSize().nestedScroll(followConnection),
                 state = listState,
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -373,8 +399,11 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                         answerable = session?.state == "waiting",
                         progress = (item as? Item.Tool)?.let { progress[it.toolId] },
                         thinkingLive = busy && item === items.lastOrNull(),
-                    ) { askId, value, confirmed, cancelled ->
-                        act { client.answer(id, askId, value, confirmed, cancelled) }
+                    ) { askId, value, confirmed, cancelled, failed ->
+                        follow = true
+                        act {
+                            try { client.answer(id, askId, value, confirmed, cancelled) } catch (e: Exception) { failed(); throw e }
+                        }
                     }
                 }
                 if (showWorking && session != null) {
@@ -387,6 +416,15 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                         )
                     }
                 }
+            }
+            if (!follow) {
+                SmallFloatingActionButton(
+                    onClick = { follow = true },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+                    containerColor = SurfaceHigh,
+                    contentColor = OffWhite,
+                ) { Icon(Icons.Filled.KeyboardArrowDown, "Jump to latest") }
+            }
             }
 
             if (!structured && (session?.state == "waiting" || (interactive && session?.busy == true))) {
@@ -451,7 +489,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).onFocusChanged { if (it.isFocused) follow = true },
                     placeholder = {
                         Text(
                             when {
@@ -476,6 +514,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                         val sending = photos.toList()
                         input = ""
                         photos.clear()
+                        follow = true
                         act {
                             try { client.send(id, text, sending) } catch (e: Exception) { input = text; photos.addAll(sending); throw e }
                         }
@@ -520,7 +559,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     }
 }
 
-private typealias Answer = (askId: String, value: String?, confirmed: Boolean?, cancelled: Boolean) -> Unit
+private typealias Answer = (askId: String, value: String?, confirmed: Boolean?, cancelled: Boolean, failed: () -> Unit) -> Unit
 
 @Composable
 private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkingLive: Boolean, onAnswer: Answer) {
@@ -660,19 +699,54 @@ private fun ToolBlock(item: Item.Tool, progress: String?) {
 private fun AskCard(item: Item.Ask, answerable: Boolean, onAnswer: Answer) {
     val heading = item.title.lineSequence().firstOrNull().orEmpty()
     val detail = (item.title.lines().drop(1) + listOfNotNull(item.message.ifBlank { null })).joinToString("\n").trim()
-    val live = item.answer == null && answerable
+    var sent by rememberSaveable(item.key) { mutableStateOf<String?>(null) }
+    val answer = item.answer ?: sent
     val danger = heading.startsWith("⚠")
     val accent = if (danger) Red else Amber
-    var text by rememberSaveable(item.key) { mutableStateOf(item.placeholder) }
+
+    if (answer != null || !answerable) {
+        val declined = answer == null || answer.startsWith("No") || answer == "Cancelled" || answer.startsWith("Deny") || answer.startsWith("Block")
+        val summary = detail.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.endsWith(":") } ?: heading
+        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+            Text(
+                when { answer == null -> "–"; declined -> "✗"; else -> "✓" },
+                color = when { answer == null -> Gray; declined -> Red; else -> Green },
+                fontSize = 13.sp, modifier = Modifier.width(18.dp),
+            )
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(color = OffWhite)) {
+                        append(
+                            when {
+                                answer == null -> "Expired"
+                                item.answer == null -> "Sending: $answer"
+                                declined -> "Declined"
+                                else -> answer
+                            },
+                        )
+                    }
+                    withStyle(SpanStyle(color = Gray)) { append("  ·  $summary") }
+                },
+                fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        return
+    }
+
+    var text by rememberSaveable(item.key + "text") { mutableStateOf(item.placeholder) }
+    fun reply(label: String, value: String?, confirmed: Boolean?, cancelled: Boolean) {
+        sent = label
+        onAnswer(item.askId, value, confirmed, cancelled) { sent = null }
+    }
     Column(
         Modifier
             .fillMaxWidth()
-            .border(BorderStroke(if (danger && live) 2.dp else 1.dp, if (live) accent else SurfaceHigh), RoundedCornerShape(10.dp))
+            .border(BorderStroke(if (danger) 2.dp else 1.dp, accent), RoundedCornerShape(10.dp))
             .background(Surface, RoundedCornerShape(10.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(heading, color = if (live) accent else OffWhite, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(heading, color = accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         if (detail.isNotBlank()) {
             Text(
                 detail,
@@ -680,36 +754,34 @@ private fun AskCard(item: Item.Ask, answerable: Boolean, onAnswer: Answer) {
                 color = OffWhite, fontFamily = Mono, fontSize = 12.sp, lineHeight = 16.sp,
             )
         }
-        when {
-            item.answer != null -> Text("→ ${item.answer}", color = Gray, fontSize = 13.sp)
-            !answerable -> Text("No longer waiting for an answer", color = Gray, fontSize = 12.sp)
-            item.method == "select" -> item.options.forEachIndexed { i, option ->
+        when (item.method) {
+            "select" -> item.options.forEachIndexed { i, option ->
                 val negative = option.equals("No", true) || option.startsWith("No,") || option.equals("Deny", true) || option.equals("Block", true)
                 OutlinedButton(
-                    onClick = { onAnswer(item.askId, option, null, false) },
+                    onClick = { reply(option, option, null, false) },
                     modifier = Modifier.fillMaxWidth(),
                     border = BorderStroke(1.dp, if (negative) SurfaceHigh else accent.copy(alpha = 0.6f)),
                 ) {
                     Text("${i + 1}. $option", color = if (negative) Gray else OffWhite, modifier = Modifier.fillMaxWidth(), fontSize = 13.sp)
                 }
             }
-            item.method == "confirm" -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { onAnswer(item.askId, null, true, false) }, modifier = Modifier.weight(1f), border = BorderStroke(1.dp, Amber.copy(alpha = 0.6f))) {
+            "confirm" -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { reply("Yes", null, true, false) }, modifier = Modifier.weight(1f), border = BorderStroke(1.dp, accent.copy(alpha = 0.6f))) {
                     Text("Yes", color = OffWhite)
                 }
-                OutlinedButton(onClick = { onAnswer(item.askId, null, false, false) }, modifier = Modifier.weight(1f)) { Text("No", color = Gray) }
+                OutlinedButton(onClick = { reply("No", null, false, false) }, modifier = Modifier.weight(1f)) { Text("No", color = Gray) }
             }
             else -> {
                 OutlinedTextField(
                     value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(),
                     maxLines = if (item.method == "editor") 10 else 3,
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Amber, unfocusedBorderColor = SurfaceHigh),
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = accent, unfocusedBorderColor = SurfaceHigh),
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { onAnswer(item.askId, text, null, false) }, modifier = Modifier.weight(1f), border = BorderStroke(1.dp, Amber.copy(alpha = 0.6f))) {
+                    OutlinedButton(onClick = { reply(text, text, null, false) }, modifier = Modifier.weight(1f), border = BorderStroke(1.dp, accent.copy(alpha = 0.6f))) {
                         Text("Send", color = OffWhite)
                     }
-                    OutlinedButton(onClick = { onAnswer(item.askId, null, null, true) }, modifier = Modifier.weight(1f)) { Text("Cancel", color = Gray) }
+                    OutlinedButton(onClick = { reply("Cancelled", null, null, true) }, modifier = Modifier.weight(1f)) { Text("Cancel", color = Gray) }
                 }
             }
         }

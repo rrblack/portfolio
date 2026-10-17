@@ -185,7 +185,12 @@ The bridge runs programs on your computer for whoever holds the token, so treat 
   Also blocked: `format`, `diskpart`, `mkfs`, and `dd of=`. The model is told not to work around a block.
 - **Always asked, with No as the first option:** every other delete, plus `git clean -f`, `git reset --hard`, `find -delete`, `robocopy /mir`, and scripts that call `rmtree`, `rmSync` or `Remove-Item`. The card lists the resolved paths.
 - **Always asked:** writes and edits to files outside the project folder.
-- **Shell commands are approved one at a time.** There is no "don't ask again" for bash or PowerShell.
+- **Commands (with "Ask before commands and edits" on):**
+  - Read-only commands run without asking: `ls`, `cat`, `grep`, `find` (without `-exec` or `-delete`), `git status`, `git log`, `git diff`, `npm ls`, and similar.
+  - Anything else shows **Yes / Allow `<program>` commands this session / Allow all non-delete commands this session / No**.
+  - A command that chains several programs is only auto-approved if every program in it is allowed.
+  - Deletes are never covered by these allowances. They always get the red card, and the blocks above always apply.
+  - The guard looks through wrappers such as `env`, `npx`, `npm exec`, `timeout`, `start`, `cmd /c` and `bash -c`, so a delete hidden behind an allowed program is still caught.
 
 The guard reads the command text. It cannot see inside scripts the agent writes to a file and then runs. That is why every command asks by default.
 

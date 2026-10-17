@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.5.1';
+const VERSION = '0.6.0';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -591,6 +591,21 @@ function analyzeCommand(command, cwd, home, platform, env) {
       }
     }
     while (tokens.length && /^(sudo|command|exec|nohup|time|xargs|&|\.)$/i.test(tokens[0])) tokens = tokens.slice(1);
+    // Look through wrappers that run another program: env, npx, npm exec, timeout, start, ...
+    for (let unwrapped = true; unwrapped && tokens.length;) {
+      unwrapped = false;
+      const h0 = tokens[0].toLowerCase().replace(/\.(exe|cmd|bat)$/, '').replace(/^.*[\\/]/, '');
+      const sub = (tokens[1] || '').toLowerCase();
+      let skip = 0;
+      if (h0 === 'env') skip = 1;
+      else if (['npx', 'bunx', 'pnpx', 'nice', 'stdbuf', 'ionice', 'call', 'start', 'doas', 'runas', 'sudo', 'xargs', 'nohup', 'time', 'timeout'].includes(h0)) skip = 1;
+      else if (['npm', 'pnpm', 'yarn', 'bun'].includes(h0) && ['exec', 'dlx', 'x'].includes(sub)) skip = 2;
+      if (!skip) break;
+      tokens = tokens.slice(skip);
+      while (tokens.length && (/^-/.test(tokens[0]) || /^[A-Za-z_]\w*=/.test(tokens[0]) || tokens[0] === '' ||
+        (win && /^\/[a-zA-Z]+$/.test(tokens[0])) || (h0 === 'timeout' && /^\d/.test(tokens[0])))) tokens = tokens.slice(1);
+      unwrapped = true;
+    }
     if (!tokens.length) return;
     const head = tokens[0].toLowerCase().replace(/\.(exe|cmd|bat)$/, '').replace(/^.*[\\/]/, '');
     if (['cd', 'pushd', 'set-location', 'sl', 'chdir'].includes(head)) {
@@ -658,6 +673,52 @@ function analyzeCommand(command, cwd, home, platform, env) {
 }
 // guard:end
 
+// Returns the heads of the segments that are NOT read-only. Empty array => the whole command only
+// reads (search, list, status), so it runs without asking. Only uses string ops (serialized into pi).
+function writeCommandHeads(command) {
+  const FAM = {
+    git: new Set(['status', 'log', 'diff', 'show', 'branch', 'remote', 'config', 'ls-files', 'ls-remote', 'rev-parse', 'describe', 'blame', 'cat-file', 'for-each-ref', 'shortlog', 'reflog', 'name-rev', 'symbolic-ref', 'var', 'grep', 'whatchanged', 'count-objects']),
+    npm: new Set(['ls', 'list', 'view', 'info', 'show', 'outdated', 'root', 'prefix', 'ping', 'doctor', 'why', 'search', 'help', 'explain', 'fund', 'audit']),
+    pnpm: new Set(['ls', 'list', 'view', 'info', 'outdated', 'why', 'licenses', 'audit', 'root']),
+    yarn: new Set(['list', 'why', 'info', 'versions']),
+    pip: new Set(['show', 'list', 'freeze', 'check', 'config']),
+    pip3: new Set(['show', 'list', 'freeze', 'check', 'config']),
+    cargo: new Set(['tree', 'metadata', 'search', 'version']),
+    go: new Set(['version', 'env', 'list', 'doc']),
+    docker: new Set(['ps', 'images', 'version', 'info', 'logs', 'inspect', 'history', 'top', 'port', 'stats', 'diff']),
+    dotnet: new Set(['--version', '--info', '--list-sdks', '--list-runtimes']),
+    kubectl: new Set(['get', 'describe', 'logs', 'version', 'top', 'explain', 'api-resources', 'config', 'cluster-info']),
+    brew: new Set(['list', 'info', 'search', '--version', 'config', 'doctor', 'outdated', 'deps']),
+  };
+  const READ = new Set(['find', 'ls', 'dir', 'gci', 'get-childitem', 'cat', 'type', 'gc', 'get-content', 'head', 'tail', 'more', 'less', 'grep', 'rg', 'egrep', 'fgrep', 'ag', 'ack', 'fd', 'pwd', 'echo', 'printf', 'wc', 'which', 'where', 'whereis', 'whatis', 'tree', 'stat', 'file', 'du', 'df', 'printenv', 'date', 'whoami', 'hostname', 'uname', 'id', 'groups', 'basename', 'dirname', 'realpath', 'readlink', 'test', '[', 'true', 'false', 'sleep', 'sort', 'uniq', 'cut', 'column', 'jq', 'yq', 'xxd', 'od', 'strings', 'diff', 'cmp', 'nl', 'tac', 'rev', 'seq', 'man', 'help', 'history', 'alias', 'command', 'hash', 'getconf', 'locale', 'tty', 'ps', 'pgrep', 'lsof', 'ss', 'netstat', 'ifconfig', 'ipconfig', 'ip', 'cd', 'pushd', 'popd', 'set-location', 'sl', 'gl', 'get-location', 'select-string', 'measure-object', 'get-command', 'gcm', 'get-help', 'get-process', 'gps', 'get-item', 'gi', 'resolve-path', 'split-path', 'join-path', 'test-path', 'get-date', 'format-list', 'fl', 'format-table', 'ft', 'select-object', 'select', 'sort-object', 'where-object', 'foreach-object', 'out-string', 'out-host', 'write-output', 'write-host', 'compare-object', 'md5sum', 'sha1sum', 'sha256sum', 'cksum', 'git-lfs']);
+  const ASSIGN = /^([A-Za-z_]\w*)=/;
+  const heads = [];
+  const segments = command.replace(/\$\{([A-Za-z_]\w*)\}/g, '$1').split(/\s*(?:&&|\|\||;|\||\r?\n|\{|\})\s*/);
+  for (let seg of segments) {
+    seg = seg.trim();
+    if (!seg) continue;
+    const redir = seg.replace(/\d*>&\d*/g, '').replace(/&>>?/g, '');
+    const writesFile = />>?\s*[^\s&|]/.test(redir) || /\|\s*(tee|out-file|set-content|add-content)\b/i.test(seg);
+    let toks = seg.split(/\s+/).filter(Boolean);
+    while (toks.length && (/^(sudo|command|exec|nohup|time|xargs|then|do|if|elseif|else|while|for|foreach|try|finally|begin|and|or|not|!|\(|&)$/i.test(toks[0]) || ASSIGN.test(toks[0]))) toks = toks.slice(1);
+    if (!toks.length) continue;
+    const head = toks[0].toLowerCase().replace(/\.(exe|cmd|bat|ps1)$/, '').replace(/^.*[\\/]/, '');
+    if (writesFile) { heads.push(head); continue; }
+    if (head === 'find' && toks.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprintf|fls)$/.test(t))) { heads.push(head); continue; }
+    if (READ.has(head)) continue;
+    const fam = FAM[head];
+    if (fam) {
+      const sub = (toks.slice(1).find((t) => !t.startsWith('-')) || '').toLowerCase();
+      if (fam.has(sub) || (!sub && /^-/.test(toks[1] || ''))) continue;
+      heads.push(head);
+      continue;
+    }
+    if (/^(python|python3|node|ruby|perl|php|deno|bun|java|rustc|gcc|clang)$/.test(head) && toks.slice(1).every((t) => /^(-v|--version|-V|version)$/.test(t))) continue;
+    heads.push(head);
+  }
+  return heads;
+}
+
 function describeToolCall(name, input) {
   const a = input || {};
   if (typeof a.command === 'string') return a.command;
@@ -670,6 +731,8 @@ function describeToolCall(name, input) {
 function piGuardMain(pi) {
   const READ_ONLY = new Set(['read', 'grep', 'find', 'ls']);
   const always = new Set();
+  const allowedHeads = new Set();
+  let allowAllWrites = false;
   pi.on('tool_call', async (event, ctx) => {
     const name = event.toolName;
     const input = event.input || {};
@@ -688,6 +751,17 @@ function piGuardMain(pi) {
         if (choice === 'Yes, run it') return undefined;
         return { block: true, reason: 'The user declined this destructive command from their phone.' };
       }
+      const heads = writeCommandHeads(input.command);
+      if (!heads.length) return undefined;                 // read-only: searching, listing, status, reading
+      if (!asking) return undefined;                       // auto mode runs non-delete commands
+      if (allowAllWrites || heads.every((h) => allowedHeads.has(h))) return undefined;
+      const optHead = 'Allow ' + heads[0] + ' commands this session';
+      const optAll = 'Allow all non-delete commands this session';
+      const choice = await ctx.ui.select('Run this command?\n' + input.command, ['Yes', optHead, optAll, 'No']);
+      if (choice === optAll) { allowAllWrites = true; return undefined; }
+      if (choice === optHead) { heads.forEach((h) => allowedHeads.add(h)); return undefined; }
+      if (choice === 'Yes') return undefined;
+      return { block: true, reason: 'The user declined this command from their phone.' };
     }
     if ((name === 'write' || name === 'edit') && typeof input.path === 'string') {
       const target = path.resolve(cwd, input.path);
@@ -701,10 +775,9 @@ function piGuardMain(pi) {
     if (!asking || READ_ONLY.has(name)) return undefined;
     const tool = pi.getAllTools().find((t) => t.name === name);
     if (tool && tool.annotations && tool.annotations.readOnlyHint === true) return undefined;
-    if (!shell && always.has(name)) return undefined;
+    if (always.has(name)) return undefined;
     const yesAll = "Yes, and don't ask again for " + name + ' this session';
-    const options = shell ? ['Yes', 'No'] : ['Yes', yesAll, 'No'];
-    const choice = await ctx.ui.select('Allow ' + name + '?\n' + describeToolCall(name, input), options);
+    const choice = await ctx.ui.select('Allow ' + name + '?\n' + describeToolCall(name, input), ['Yes', yesAll, 'No']);
     if (choice === yesAll) always.add(name);
     if (choice === 'Yes' || choice === yesAll) return undefined;
     return { block: true, reason: 'The user declined this ' + name + ' call from their phone.' };
@@ -717,6 +790,7 @@ const PI_PERMISSION_EXTENSION = [
   "import path from 'node:path';",
   "import os from 'node:os';",
   analyzeCommand.toString(),
+  writeCommandHeads.toString(),
   describeToolCall.toString(),
   'export default ' + piGuardMain.toString(),
   '',
