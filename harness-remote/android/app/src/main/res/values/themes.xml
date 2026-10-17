@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.HarnessRemote" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF080808</item>
+        <item name="android:statusBarColor">#FF080808</item>
+        <item name="android:navigationBarColor">#FF080808</item>
+    </style>
+</resources>
