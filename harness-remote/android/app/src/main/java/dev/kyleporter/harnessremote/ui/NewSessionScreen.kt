@@ -76,11 +76,13 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
 
-    fun browse(path: String?) {
+    val recent = remember { hub.recentFolders(client.server.id) }
+
+    fun browse(path: String?, fallback: Boolean = false) {
         scope.launch {
             runCatching { client.listDir(path) }
-                .onSuccess { listing = it }
-                .onFailure { error = it.message }
+                .onSuccess { listing = it; error = null }
+                .onFailure { if (fallback) browse(null) else error = it.message }
         }
     }
 
@@ -88,7 +90,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
         if (harnessId == null) harnessId = hello?.harnesses?.firstOrNull { it.available }?.id
     }
     LaunchedEffect(Unit) {
-        browse(null)
+        browse(recent.firstOrNull(), fallback = true)
         catalog = runCatching { client.models() }.getOrElse { error = it.message; ModelCatalog(emptyList(), emptyMap(), false) }
     }
 
@@ -216,17 +218,45 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
             }
 
             Section("Project folder")
+            if (recent.isNotEmpty()) {
+                Text("Recent", color = Gray, fontSize = 12.sp)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    recent.forEach { r ->
+                        FilterChip(
+                            selected = listing?.path == r,
+                            onClick = { browse(r) },
+                            label = { Text(baseName(r), fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Red.copy(alpha = 0.25f)),
+                        )
+                    }
+                }
+            }
             listing?.let { l ->
-                Text(l.path + if (l.git) "  (git)" else "", fontFamily = Mono, fontSize = 12.sp, color = OffWhite)
+                val roots = hello?.roots.orEmpty()
+                FlowRow(verticalArrangement = Arrangement.Center) {
+                    pathCrumbs(l.path).forEachIndexed { i, (label, full) ->
+                        val allowed = roots.any { root -> full.length >= root.trimEnd('/', '\\').length && full.startsWith(root.trimEnd('/', '\\'), ignoreCase = true) }
+                        if (i > 0) Text(" › ", color = Gray, fontSize = 12.sp)
+                        Text(
+                            label, fontFamily = Mono, fontSize = 12.sp,
+                            color = if (full == l.path) OffWhite else if (allowed) Red else Gray,
+                            modifier = Modifier.clickable(enabled = allowed && full != l.path) { browse(full) },
+                        )
+                    }
+                }
+                Text(
+                    "Selected: ${baseName(l.path)}${if (l.git) "  (git repo)" else ""} · tap a folder below to open it",
+                    color = Gray, fontSize = 11.sp,
+                )
                 Column(
-                    Modifier.fillMaxWidth().heightIn(max = 280.dp).background(Surface, RoundedCornerShape(10.dp))
+                    Modifier.fillMaxWidth().heightIn(max = 320.dp).background(Surface, RoundedCornerShape(10.dp))
                         .verticalScroll(rememberScrollState()),
                 ) {
                     l.parent?.let { parent ->
-                        DirRow("..") { browse(parent) }
+                        DirRow("↑  up to ${baseName(parent)}") { browse(parent) }
                     }
                     l.dirs.forEach { d -> DirRow("$d/") { browse(childPath(l.path, d)) } }
-                    if (l.dirs.isEmpty() && l.parent == null) Text("Empty", Modifier.padding(12.dp), color = Gray)
+                    if (l.dirs.isEmpty()) Text("No subfolders", Modifier.padding(12.dp), color = Gray, fontSize = 13.sp)
                 }
             } ?: Text("Loading…", color = Gray)
 
@@ -247,6 +277,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     scope.launch {
                         try {
                             val s = client.create(h.id, dir, if (h.models != null) model else "", if (h.models != null) provider else "", title, askPermission)
+                            hub.rememberFolder(client.server.id, dir)
                             hub.route.value = Route.Session(s.id)
                         } catch (e: Exception) {
                             error = e.message
@@ -258,6 +289,20 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
             ) { Text("Start in ${listing?.path?.let(::baseName) ?: "…"}") }
             TextButton(onClick = { hub.route.value = Route.Sessions }, modifier = Modifier.fillMaxWidth()) { Text("Cancel", color = Gray) }
         }
+    }
+}
+
+private fun pathCrumbs(path: String): List<Pair<String, String>> {
+    val windows = '\\' in path && '/' !in path
+    val sep = if (windows) '\\' else '/'
+    var acc = if (windows) "" else "/"
+    return path.split('/', '\\').filter { it.isNotEmpty() }.mapIndexed { i, part ->
+        acc = when {
+            windows && i == 0 -> "$part\\"
+            acc.endsWith(sep) -> acc + part
+            else -> "$acc$sep$part"
+        }
+        part to acc
     }
 }
 

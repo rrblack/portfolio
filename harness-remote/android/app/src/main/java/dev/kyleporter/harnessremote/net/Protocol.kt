@@ -37,6 +37,8 @@ data class HarnessInfo(
     val mode: String,
     val models: List<String>?,
     val requiresModel: Boolean,
+    val effort: Boolean,
+    val images: String,
     val available: Boolean,
     val reason: String?,
     val command: String,
@@ -58,6 +60,7 @@ data class SessionSummary(
     val cwd: String,
     val model: String,
     val provider: String,
+    val thinking: String,
     val permissions: String,
     val createdAt: Long,
     val updatedAt: Long,
@@ -86,9 +89,15 @@ data class BridgeEvent(
     val options: List<String> = emptyList(),
     val placeholder: String = "",
     val steer: Boolean = false,
+    val thumbs: List<String> = emptyList(),
+    val parent: String = "",
 )
 
-data class ModelInfo(val provider: String, val name: String, val params: String)
+data class ModelInfo(val provider: String, val name: String, val params: String, val vision: Boolean = false)
+
+data class Photo(val data: String, val mimeType: String, val thumb: String)
+
+val EFFORT_LEVELS = listOf("off", "minimal", "low", "medium", "high")
 
 data class ModelCatalog(val models: List<ModelInfo>, val errors: Map<String, String>, val lms: Boolean)
 
@@ -133,6 +142,8 @@ fun parseHarness(o: JSONObject) = HarnessInfo(
         else -> null
     },
     requiresModel = o.optBoolean("requiresModel"),
+    effort = o.optBoolean("effort"),
+    images = o.str("images"),
     available = o.optBoolean("available"),
     reason = o.strOrNull("reason"),
     command = o.str("command"),
@@ -154,6 +165,7 @@ fun parseSession(o: JSONObject) = SessionSummary(
     cwd = o.str("cwd"),
     model = o.str("model"),
     provider = o.str("provider"),
+    thinking = o.str("thinking"),
     permissions = o.str("permissions"),
     createdAt = o.optLong("createdAt"),
     updatedAt = o.optLong("updatedAt"),
@@ -182,12 +194,14 @@ fun parseEvent(o: JSONObject) = BridgeEvent(
     options = o.optJSONArray("options").strings(),
     placeholder = o.str("placeholder"),
     steer = o.optBoolean("steer"),
+    thumbs = o.optJSONArray("thumbs").strings(),
+    parent = o.str("parent"),
 )
 
 fun parseEvents(a: JSONArray?) = a.mapObjects(::parseEvent)
 
 fun parseModels(o: JSONObject): ModelCatalog {
-    val models = o.optJSONArray("lmstudio").mapObjects { ModelInfo("lmstudio", it.str("name"), it.str("params")) } +
+    val models = o.optJSONArray("lmstudio").mapObjects { ModelInfo("lmstudio", it.str("name"), it.str("params"), it.optBoolean("vision")) } +
         o.optJSONArray("ollama").mapObjects { ModelInfo("ollama", it.str("name"), it.str("params")) }
     val errs = o.optJSONObject("errors")
     val errors = errs?.keys()?.asSequence()?.associateWith { errs.str(it) }.orEmpty()

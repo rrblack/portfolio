@@ -19,6 +19,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -223,7 +224,21 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
         return s
     }
 
-    suspend fun send(id: String, text: String) { request("send") { put("id", id); put("text", text) } }
+    suspend fun send(id: String, text: String, photos: List<Photo> = emptyList()) {
+        request("send") {
+            put("id", id); put("text", text)
+            if (photos.isNotEmpty()) {
+                put("images", JSONArray(photos.map { JSONObject().put("data", it.data).put("mimeType", it.mimeType) }))
+                put("thumbs", JSONArray(photos.map { it.thumb }))
+            }
+        }
+    }
+
+    suspend fun setModel(id: String, model: String, provider: String) {
+        request("set-model") { put("id", id); put("model", model); put("provider", provider) }
+    }
+
+    suspend fun setEffort(id: String, level: String) { request("set-effort") { put("id", id); put("level", level) } }
 
     suspend fun stdin(id: String, data: String) { request("stdin") { put("id", id); put("data", data) } }
 

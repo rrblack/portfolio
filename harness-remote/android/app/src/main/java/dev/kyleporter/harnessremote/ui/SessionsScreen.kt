@@ -68,7 +68,7 @@ fun SessionsScreen(hub: Hub, client: BridgeClient) {
                 title = {
                     Column {
                         Text(client.server.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        ConnLine(conn)
+                        ConnLine(conn, hello?.version)
                     }
                 },
                 actions = {
@@ -156,9 +156,9 @@ fun SessionsScreen(hub: Hub, client: BridgeClient) {
 }
 
 @Composable
-fun ConnLine(conn: ConnState) {
+fun ConnLine(conn: ConnState, bridgeVersion: String? = null) {
     val (text, color) = when (conn) {
-        ConnState.Connected -> "Connected" to Green
+        ConnState.Connected -> (if (bridgeVersion.isNullOrBlank()) "Connected" else "Connected · bridge $bridgeVersion") to Green
         ConnState.Connecting -> "Connecting…" to Amber
         is ConnState.Retrying -> "Reconnecting in ${conn.seconds}s · ${conn.reason}" to Amber
         is ConnState.Failed -> "Not authorized" to Red

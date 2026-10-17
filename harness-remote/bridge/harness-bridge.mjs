@@ -11,10 +11,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.3.1';
+const VERSION = '0.4.0';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-const MAX_MESSAGE = 1024 * 1024;
+const MAX_MESSAGE = 24 * 1024 * 1024;
+const MAX_IMAGES = 6;
+const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const MAX_PROMPT = 100 * 1024;
 const MAX_EVENTS = 4000;
 const FLUSH_MS = 80;
@@ -112,7 +114,8 @@ const PRESETS = [
     description: 'Live thinking, tool calls and permission prompts (pi RPC mode). The bridge adds the model you pick to ~/.pi/agent/models.json if it is missing.',
     mode: 'rpc',
     command: 'pi',
-    args: ['--mode', 'rpc', '--session-id', 'harness-remote-{session}', '{modelArgs}', '-e', '{piPermissionExtension}'],
+    args: ['--mode', 'rpc', '--session-id', 'harness-remote-{session}', '{modelArgs}', '{thinkingArgs}', '-e', '{piPermissionExtension}'],
+    effort: true,
     ignoreStderr: ["^Warning: No project session found with id 'harness-remote-"],
     backends: {
       [LMSTUDIO]: { modelArgs: ['--provider', 'lmstudio', '--model', '{model}'], piProvider: { key: 'lmstudio', baseUrl: '{lmstudio}/v1', apiKey: 'lm-studio' } },
@@ -286,6 +289,8 @@ function publicHarness(h) {
     mode: h.mode === 'interactive' || h.mode === 'rpc' ? h.mode : 'turn',
     models: providersOf(h).length ? providersOf(h) : null,
     requiresModel: !!h.requiresModel,
+    effort: !!h.effort,
+    images: h.mode === 'rpc' ? 'native' : 'files',
     available: !unavailableReason(h),
     reason: unavailableReason(h),
     command: h.command,
@@ -308,6 +313,8 @@ function buildArgs(template, h, vars) {
   for (const a of template) {
     if (a === '{modelArgs}') {
       if (vars.model) for (const m of h.modelArgs || []) out.push(fill(m, vars));
+    } else if (a === '{thinkingArgs}') {
+      if (vars.thinking) out.push('--thinking', vars.thinking);
     } else {
       out.push(fill(a, vars));
     }
@@ -391,13 +398,16 @@ function lmsPath() {
   return which('lms') || (fs.existsSync(bundled) ? bundled : null);
 }
 
+const visionModels = new Set();
+
 async function lmStudioModels() {
   const isChat = (m) => !m.type || m.type === 'llm' || m.type === 'vlm';
   try {
     const j = await fetchJson(`${config.lmstudio}/api/v0/models`);
+    for (const m of j.data || []) if (m.type === 'vlm') visionModels.add(`${LMSTUDIO}/${m.id}`);
     return (j.data || []).filter(isChat).map((m) => ({
-      name: m.id, size: 0, family: m.arch || '',
-      params: [m.quantization, m.state === 'loaded' ? 'loaded' : ''].filter(Boolean).join(' · '),
+      name: m.id, size: 0, family: m.arch || '', vision: m.type === 'vlm',
+      params: [m.quantization, m.type === 'vlm' ? 'vision' : '', m.state === 'loaded' ? 'loaded' : ''].filter(Boolean).join(' · '),
     }));
   } catch {
     const j = await fetchJson(`${config.lmstudio}/v1/models`);
@@ -437,7 +447,7 @@ function startLmStudio() {
 }
 
 // pi only sees models listed in its models.json, so add the one the phone picked.
-function ensurePiModel(spec, model, vars) {
+function ensurePiModel(spec, model, vars, vision) {
   const envDir = process.env.PI_CODING_AGENT_DIR;
   const dir = envDir ? path.resolve(envDir.replace(/^~(?=$|[\\/])/, os.homedir())) : path.join(os.homedir(), '.pi', 'agent');
   const file = path.join(dir, 'models.json');
@@ -455,9 +465,14 @@ function ensurePiModel(spec, model, vars) {
     changed = true;
   }
   if (!Array.isArray(provider.models)) provider.models = [];
-  if (!provider.models.some((m) => m && m.id === model)) {
-    provider.models.push({ id: model });
+  const entry = provider.models.find((m) => m && m.id === model);
+  if (!entry) {
+    provider.models.push(vision ? { id: model, reasoning: true, input: ['text', 'image'] } : { id: model, reasoning: true });
     changed = true;
+  } else {
+    // Entries the bridge wrote before 0.4 were bare { id }: let them think. Vision models also need image input.
+    if (Object.keys(entry).length === 1) { entry.reasoning = true; changed = true; }
+    if (vision && !entry.input) { entry.input = ['text', 'image']; changed = true; }
   }
   if (!changed) return null;
   fs.mkdirSync(dir, { recursive: true });
@@ -560,6 +575,7 @@ function piRecordHandler(s, p) {
         if (o.aborted) pushEvent(s, { kind: 'status', text: 'Interrupted' });
         p.asks.clear();
         setState(s, 'idle');
+        if (p.restartWhenIdle) quietKill(p);
         return;
       case 'message_update': {
         const e = o.assistantMessageEvent || {};
@@ -576,19 +592,16 @@ function piRecordHandler(s, p) {
         return;
       }
       case 'tool_execution_start':
-        if (o.parentToolCallId) return;
         streamFlush();
-        pushEvent(s, { kind: 'tool', toolId: o.toolCallId, tool: o.toolName, text: toolSummary(o.args) });
+        pushEvent(s, { kind: 'tool', toolId: o.toolCallId, tool: o.toolName, text: toolSummary(o.args), parent: o.parentToolCallId || undefined });
         return;
       case 'tool_execution_update': {
-        if (o.parentToolCallId) return;
         const text = contentText(o.partialResult);
         p.progress.set(o.toolCallId, text.length > 3000 ? text.slice(-3000) : text);
         if (!p.progressTimer) p.progressTimer = setTimeout(sendProgress, 250);
         return;
       }
       case 'tool_execution_end':
-        if (o.parentToolCallId) return;
         p.progress.delete(o.toolCallId);
         streamFlush();
         pushEvent(s, { kind: 'toolres', toolId: o.toolCallId, tool: o.toolName, isError: !!o.isError, durationMs: o.durationMs || 0, text: toolResultText(o.result) });
@@ -656,7 +669,7 @@ function scheduleSave() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, permissions, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, permissions, createdAt, updatedAt, turns, state, seq, events }));
+    const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, thinking, permissions, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, thinking, permissions, createdAt, updatedAt, turns, state, seq, events }));
     try { saveJson(sessionsPath, data, 0o600); } catch (e) { console.error('save failed:', e.message); }
   }, 1000);
 }
@@ -664,7 +677,7 @@ function scheduleSave() {
 function summary(s) {
   const last = [...s.events].reverse().find((e) => ['user', 'out', 'text', 'ask', 'tool'].includes(e.kind));
   return {
-    id: s.id, title: s.title, harness: s.harness, cwd: s.cwd, model: s.model, provider: s.provider || '', permissions: s.permissions || 'ask', runningSince: s.runningSince || 0,
+    id: s.id, title: s.title, harness: s.harness, cwd: s.cwd, model: s.model, provider: s.provider || '', thinking: s.thinking || '', permissions: s.permissions || 'ask', runningSince: s.runningSince || 0,
     createdAt: s.createdAt, updatedAt: s.updatedAt, turns: s.turns, state: s.state, seq: s.seq,
     preview: last ? stripAnsi(last.text || '').trim().slice(-160) : '',
   };
@@ -721,7 +734,7 @@ function createSession({ harness, cwd, model, provider, title, permissions }) {
 
 function startProcess(s, harness, prompt) {
   const h = withBackend(harness, s.provider);
-  const vars = { prompt: prompt ?? '', model: s.model, provider: s.provider || '', session: s.id, cwd: s.cwd, ollama: config.ollama, lmstudio: config.lmstudio };
+  const vars = { prompt: prompt ?? '', model: s.model, provider: s.provider || '', thinking: s.thinking || '', session: s.id, cwd: s.cwd, ollama: config.ollama, lmstudio: config.lmstudio };
   const rpc = h.mode === 'rpc';
   if ((h.args || []).includes('{piPermissionExtension}')) {
     try { vars.piPermissionExtension = piPermissionExtension(); } catch (e) {
@@ -731,7 +744,7 @@ function startProcess(s, harness, prompt) {
   }
   if (h.piProvider && s.model) {
     try {
-      const file = ensurePiModel(h.piProvider, s.model, vars);
+      const file = ensurePiModel(h.piProvider, s.model, vars, visionModels.has(`${s.provider}/${s.model}`));
       if (file) pushEvent(s, { kind: 'status', text: `Added ${h.piProvider.key}/${s.model} to ${file}` });
     } catch (e) {
       pushEvent(s, { kind: 'err', text: `${e.message}\n` });
@@ -831,7 +844,7 @@ function startProcess(s, harness, prompt) {
     if (p.streamFlush) p.streamFlush();
     if (procs.get(s.id) === p) procs.delete(s.id);
     const text = failure ? `Failed to start ${h.command}: ${failure}` : p.stopped || signal ? 'Stopped' : `Exited with code ${code}`;
-    pushEvent(s, { kind: 'exit', code: failure ? -1 : code ?? null, text });
+    if (!p.quiet) pushEvent(s, { kind: 'exit', code: failure ? -1 : code ?? null, text });
     setState(s, interactive ? 'exited' : 'idle');
   };
   child.on('error', (e) => {
@@ -842,22 +855,42 @@ function startProcess(s, harness, prompt) {
   return p;
 }
 
-function sendToSession(s, text) {
+// Harnesses without native image input get the photos as files, referenced by path in the prompt.
+function saveUploads(s, images) {
+  const dir = path.join(os.tmpdir(), 'harness-remote-uploads', s.id);
+  fs.mkdirSync(dir, { recursive: true });
+  return images.map((img, i) => {
+    const ext = img.mimeType === 'image/png' ? 'png' : img.mimeType === 'image/webp' ? 'webp' : 'jpg';
+    const file = path.join(dir, `${Date.now()}-${i + 1}.${ext}`);
+    fs.writeFileSync(file, Buffer.from(img.data, 'base64'));
+    return file;
+  });
+}
+
+function sendToSession(s, text, images = [], thumbs = []) {
   const h = harnessList().find((x) => x.id === s.harness);
   if (!h) throw new Error(`Harness ${s.harness} is no longer configured`);
   const running = procs.get(s.id);
+  const typed = text;
+  const userEvent = (extra) => ({ kind: 'user', text: typed, ...(thumbs.length ? { thumbs } : {}), ...extra });
   if (h.mode === 'rpc') {
     const p = running || startProcess(s, h, null);
     if (!p) return;
     const busy = s.state === 'running' || s.state === 'waiting';
-    pushEvent(s, busy ? { kind: 'user', text, steer: true } : { kind: 'user', text });
-    rpcWrite(p, busy ? { type: 'prompt', message: text, streamingBehavior: 'steer' } : { type: 'prompt', message: text });
+    pushEvent(s, userEvent(busy ? { steer: true } : {}));
+    const message = text || (images.length ? 'See the attached image.' : '');
+    const imgs = images.length ? { images: images.map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType })) } : {};
+    rpcWrite(p, busy ? { type: 'prompt', message, streamingBehavior: 'steer', ...imgs } : { type: 'prompt', message, ...imgs });
     if (!busy) setState(s, 'running');
     s.turns++;
     return;
   }
+  if (images.length) {
+    const files = saveUploads(s, images);
+    text = `${text}${text ? '\n\n' : ''}${files.map((f) => `Attached image: ${f}`).join('\n')}`;
+  }
   if (h.mode === 'interactive') {
-    pushEvent(s, { kind: 'user', text });
+    pushEvent(s, userEvent({}));
     let p = running;
     if (!p) p = startProcess(s, h, null);
     if (!p) return;
@@ -867,14 +900,52 @@ function sendToSession(s, text) {
   }
   if (running) {
     if (running.child.stdin) {
-      pushEvent(s, { kind: 'user', text, stdin: true });
+      pushEvent(s, userEvent({ stdin: true }));
       running.child.stdin.write(text + '\n');
       return;
     }
     throw new Error('A turn is still running. Stop it first or wait for it to finish.');
   }
-  pushEvent(s, { kind: 'user', text });
+  pushEvent(s, userEvent({}));
   if (startProcess(s, h, text)) s.turns++;
+}
+
+function quietKill(p) {
+  p.quiet = true;
+  p.stopped = true;
+  try {
+    if (IS_WIN) spawn('taskkill', ['/pid', String(p.child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => p.child.kill());
+    else process.kill(-p.child.pid, 'SIGTERM');
+  } catch { try { p.child.kill(); } catch {} }
+}
+
+function setModel(s, model, provider) {
+  const h = harnessList().find((x) => x.id === s.harness);
+  if (!h) throw new Error(`Harness ${s.harness} is no longer configured`);
+  const providers = providersOf(h);
+  if (!model) throw new Error('Pick a model');
+  s.model = String(model);
+  s.provider = providers.includes(provider) ? provider : s.provider || providers[0] || '';
+  const via = s.provider === LMSTUDIO ? ' (LM Studio)' : s.provider === OLLAMA ? ' (Ollama)' : '';
+  // A running pi only knows the models it loaded at startup, so restart it; the session id keeps the history.
+  const p = procs.get(s.id);
+  if (p && h.mode === 'rpc') {
+    if (s.state === 'running' || s.state === 'waiting') p.restartWhenIdle = true;
+    else quietKill(p);
+  }
+  pushEvent(s, { kind: 'status', text: `Model: ${s.model}${via}` });
+  broadcastSessions();
+}
+
+function setEffort(s, level) {
+  const h = harnessList().find((x) => x.id === s.harness);
+  if (!h || !h.effort) throw new Error('This harness has no effort setting');
+  if (!EFFORTS.includes(level)) throw new Error(`Unknown effort level: ${level}`);
+  s.thinking = level;
+  const p = procs.get(s.id);
+  if (p && p.rpc) rpcWrite(p, { type: 'set_thinking_level', level });
+  pushEvent(s, { kind: 'status', text: `Effort: ${level}` });
+  broadcastSessions();
 }
 
 function writeRaw(s, data) {
@@ -1070,11 +1141,16 @@ async function handle(c, raw) {
       case 'unsubscribe': c.subs.delete(msg.id); return reply({ t: 'ok' });
       case 'send': {
         const text = String(msg.text ?? '');
-        if (!text.trim()) throw new Error('Empty message');
+        const images = (Array.isArray(msg.images) ? msg.images : []).slice(0, MAX_IMAGES)
+          .filter((i) => i && typeof i.data === 'string' && /^image\/(jpeg|png|webp)$/.test(i.mimeType));
+        const thumbs = (Array.isArray(msg.thumbs) ? msg.thumbs : []).slice(0, MAX_IMAGES).filter((t) => typeof t === 'string' && t.length < 40000);
+        if (!text.trim() && !images.length) throw new Error('Empty message');
         if (Buffer.byteLength(text) > MAX_PROMPT) throw new Error('Message is too long (100 KB max)');
-        sendToSession(need(msg.id), text);
+        sendToSession(need(msg.id), text, images, thumbs);
         return reply({ t: 'ok' });
       }
+      case 'set-model': setModel(need(msg.id), msg.model, msg.provider); return reply({ t: 'ok' });
+      case 'set-effort': setEffort(need(msg.id), String(msg.level)); return reply({ t: 'ok' });
       case 'stdin': writeRaw(need(msg.id), String(msg.data ?? '')); return reply({ t: 'ok' });
       case 'answer': answerAsk(need(msg.id), String(msg.askId), msg); return reply({ t: 'ok' });
       case 'stop': stopSession(need(msg.id), msg.signal === 'SIGTERM' ? 'SIGTERM' : 'SIGINT'); return reply({ t: 'ok' });
@@ -1230,7 +1306,7 @@ function shutdown() {
   for (const s of sessions.values()) stopSession(s, 'SIGTERM');
   clearTimeout(saveTimer);
   saveTimer = null;
-  const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, permissions, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, permissions, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
+  const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, thinking, permissions, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, thinking, permissions, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
   try { saveJson(sessionsPath, data, 0o600); } catch {}
   process.exit(0);
 }

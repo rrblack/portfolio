@@ -1,6 +1,35 @@
 package dev.kyleporter.harnessremote.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
+import dev.kyleporter.harnessremote.net.Photo
+import kotlin.math.cos
+import kotlin.math.sin
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -52,7 +81,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,14 +105,15 @@ import kotlinx.coroutines.launch
 
 private sealed interface Item {
     val key: String
-    data class User(override val key: String, val text: String, val steer: Boolean) : Item
+    data class User(override val key: String, val text: String, val steer: Boolean, val thumbs: List<String>) : Item
     data class Output(override val key: String, val text: String, val err: Boolean) : Item
     data class Note(override val key: String, val text: String, val bad: Boolean) : Item
     data class Assistant(override val key: String, val text: String) : Item
-    data class Thinking(override val key: String, val text: String) : Item
+    data class Thinking(override val key: String, val text: String, val startTs: Long, val endTs: Long?) : Item
     data class Tool(
         override val key: String,
         val toolId: String,
+        val nested: Boolean,
         val name: String,
         val summary: String,
         val result: String?,
@@ -120,14 +149,15 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
     val buf = StringBuilder()
     var bufKey = ""
     var bufKind = ""
+    var bufTs = 0L
     var part = 0
     val tools = HashMap<String, Int>()
     val asks = HashMap<String, Int>()
-    fun flush() {
+    fun flush(nextTs: Long? = null) {
         if (buf.isEmpty()) return
         when (bufKind) {
             "text" -> buf.toString().trim().takeIf { it.isNotEmpty() }?.let { out += Item.Assistant(bufKey, it) }
-            "think" -> buf.toString().trim().takeIf { it.isNotEmpty() }?.let { out += Item.Thinking(bufKey, it) }
+            "think" -> buf.toString().trim().takeIf { it.isNotEmpty() }?.let { out += Item.Thinking(bufKey, it, bufTs, nextTs) }
             else -> {
                 val text = cleanTerminal(buf.toString()).trimEnd('\n')
                 if (text.isNotBlank()) out += Item.Output(bufKey, text, bufKind == "err")
@@ -136,10 +166,11 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
         buf.setLength(0)
     }
     for (e in events) {
+        if (buf.isNotEmpty() && e.kind != bufKind && bufKind == "think") flush(e.ts)
         when (e.kind) {
             "out", "err", "text", "think" -> {
                 if (buf.isNotEmpty() && e.kind != bufKind) flush()
-                if (buf.isEmpty()) { bufKey = "${e.kind}${e.seq}"; bufKind = e.kind }
+                if (buf.isEmpty()) { bufKey = "${e.kind}${e.seq}"; bufKind = e.kind; bufTs = e.ts }
                 buf.append(e.text)
                 if ((bufKind == "out" || bufKind == "err") && buf.length > MAX_BLOCK) {
                     val cut = buf.lastIndexOf("\n").takeIf { it > MAX_BLOCK / 2 } ?: buf.length
@@ -150,18 +181,18 @@ private fun buildItems(events: List<BridgeEvent>, interactive: Boolean): List<It
                     bufKey = "$bufKind${e.seq}.${++part}"
                 }
             }
-            "user" -> { flush(); out += Item.User("u${e.seq}", e.text, e.steer) }
+            "user" -> { flush(); out += Item.User("u${e.seq}", e.text, e.steer, e.thumbs) }
             "tool" -> {
                 flush()
                 tools[e.toolId] = out.size
-                out += Item.Tool("t${e.seq}", e.toolId, e.tool, e.text, null, false, 0)
+                out += Item.Tool("t${e.seq}", e.toolId, e.parent.isNotEmpty(), e.tool, e.text, null, false, 0)
             }
             "toolres" -> {
                 flush()
                 val i = tools[e.toolId]
                 val t = i?.let { out[it] as? Item.Tool }
                 if (i != null && t != null) out[i] = t.copy(result = e.text, isError = e.isError, durationMs = e.durationMs)
-                else out += Item.Tool("t${e.seq}", e.toolId, e.tool, "", e.text, e.isError, e.durationMs)
+                else out += Item.Tool("t${e.seq}", e.toolId, e.parent.isNotEmpty(), e.tool, "", e.text, e.isError, e.durationMs)
             }
             "ask" -> {
                 flush()
@@ -210,6 +241,16 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
     var input by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    val photos = remember { mutableStateListOf<Photo>() }
+    val context = LocalContext.current
+    val pickPhotos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(4)) { uris ->
+        scope.launch {
+            for (uri in uris) {
+                runCatching { loadPhoto(context, uri) }.onSuccess { photos += it }.onFailure { error = "Could not read a photo: ${it.message}" }
+            }
+        }
+    }
 
     LaunchedEffect(id, conn) {
         if (conn == ConnState.Connected) runCatching { client.subscribe(id) }.onFailure { error = it.message }
@@ -239,6 +280,7 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
         is Item.Assistant -> "Writing"
         else -> null
     }
+    val busy = session?.busy == true
 
     Scaffold(
         containerColor = Black,
@@ -256,8 +298,12 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                                 StateChip(session?.state ?: "idle")
                                 Spacer(Modifier.width(8.dp))
                                 Text(
-                                    listOfNotNull(harness?.name, session?.model?.ifBlank { null }).joinToString(" · "),
+                                    listOfNotNull(
+                                        session?.model?.ifBlank { null } ?: harness?.name,
+                                        session?.thinking?.ifBlank { null }?.let { "effort $it" },
+                                    ).joinToString(" · ") + if (harness?.models != null) "  ▾" else "",
                                     color = Gray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.clickable(enabled = harness?.models != null || harness?.effort == true) { showSettings = true },
                                 )
                             }
                         }
@@ -284,7 +330,12 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(items, key = { it.key }) { item ->
-                    ItemView(item, answerable = session?.state == "waiting", progress = (item as? Item.Tool)?.let { progress[it.toolId] }) { askId, value, confirmed, cancelled ->
+                    ItemView(
+                        item,
+                        answerable = session?.state == "waiting",
+                        progress = (item as? Item.Tool)?.let { progress[it.toolId] },
+                        thinkingLive = busy && item === items.lastOrNull(),
+                    ) { askId, value, confirmed, cancelled ->
                         act { client.answer(id, askId, value, confirmed, cancelled) }
                     }
                 }
@@ -332,10 +383,33 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                 Text(it, color = Red, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
             }
 
+            if (photos.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().background(Surface).horizontalScroll(rememberScrollState()).padding(start = 8.dp, top = 8.dp, end = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    photos.forEachIndexed { i, photo ->
+                        Box {
+                            val bmp = remember(photo.thumb) { decodeThumb(photo.thumb) }
+                            if (bmp != null) Image(bmp, null, Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
+                            Text(
+                                "✕", color = OffWhite, fontSize = 11.sp,
+                                modifier = Modifier.align(Alignment.TopEnd).background(Black.copy(alpha = 0.7f), CircleShape)
+                                    .clickable { photos.removeAt(i) }.padding(horizontal = 5.dp, vertical = 1.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
             Row(
                 Modifier.fillMaxWidth().background(Surface).navigationBarsPadding().padding(8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
+                IconButton(
+                    onClick = { pickPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                    enabled = photos.size < 4,
+                ) { Icon(Icons.Filled.Add, "Attach photos", tint = Gray) }
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
@@ -356,18 +430,36 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
                     maxLines = 6,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Red, unfocusedBorderColor = SurfaceHigh),
                 )
+                val canSend = (input.isNotBlank() || photos.isNotEmpty()) && conn == ConnState.Connected
                 IconButton(
-                    enabled = input.isNotBlank() && conn == ConnState.Connected,
+                    enabled = canSend,
                     onClick = {
                         val text = input
+                        val sending = photos.toList()
                         input = ""
+                        photos.clear()
                         act {
-                            try { client.send(id, text) } catch (e: Exception) { input = text; throw e }
+                            try { client.send(id, text, sending) } catch (e: Exception) { input = text; photos.addAll(sending); throw e }
                         }
                     },
-                ) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = if (input.isNotBlank()) Red else Gray) }
+                ) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = if (canSend) Red else Gray) }
             }
         }
+    }
+
+    if (showSettings && session != null && harness != null) {
+        SessionSettingsDialog(
+            client = client,
+            harnessModels = harness.models.orEmpty(),
+            showEffort = harness.effort,
+            currentModel = session.model,
+            currentProvider = session.provider,
+            currentEffort = session.thinking,
+            busy = busy,
+            onDismiss = { showSettings = false },
+            onModel = { model, provider -> act { client.setModel(id, model, provider) } },
+            onEffort = { level -> act { client.setEffort(id, level) } },
+        )
     }
 
     if (confirmDelete) {
@@ -393,10 +485,18 @@ fun SessionScreen(hub: Hub, client: BridgeClient, id: String) {
 private typealias Answer = (askId: String, value: String?, confirmed: Boolean?, cancelled: Boolean) -> Unit
 
 @Composable
-private fun ItemView(item: Item, answerable: Boolean, progress: String?, onAnswer: Answer) {
+private fun ItemView(item: Item, answerable: Boolean, progress: String?, thinkingLive: Boolean, onAnswer: Answer) {
     when (item) {
         is Item.User -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
-            SelectionContainer {
+            if (item.thumbs.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 4.dp)) {
+                    item.thumbs.forEach { t ->
+                        val bmp = remember(t) { decodeThumb(t) }
+                        if (bmp != null) Image(bmp, null, Modifier.size(72.dp).clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.Crop)
+                    }
+                }
+            }
+            if (item.text.isNotBlank()) SelectionContainer {
                 Text(
                     item.text,
                     Modifier.widthIn(max = 320.dp).background(Red.copy(alpha = 0.18f), RoundedCornerShape(14.dp, 14.dp, 4.dp, 14.dp))
@@ -407,10 +507,10 @@ private fun ItemView(item: Item, answerable: Boolean, progress: String?, onAnswe
             if (item.steer) Text("sent mid-task · read after the current step", color = Gray, fontSize = 10.sp)
         }
         is Item.Assistant -> Row(Modifier.fillMaxWidth()) {
-            Text("⏺", color = OffWhite, fontSize = 12.sp, modifier = Modifier.width(18.dp).padding(top = 3.dp))
-            SelectionContainer { Text(item.text, color = OffWhite, fontSize = 15.sp, lineHeight = 21.sp) }
+            Dot(OffWhite, Modifier.padding(top = 8.dp))
+            SelectionContainer { MarkdownText(item.text) }
         }
-        is Item.Thinking -> ThinkingBlock(item)
+        is Item.Thinking -> ThinkingBlock(item, live = item.endTs == null && thinkingLive)
         is Item.Tool -> ToolBlock(item, progress)
         is Item.Ask -> AskCard(item, answerable, onAnswer)
         is Item.Output -> if (item.err) WarningBlock(item) else SelectionContainer {
@@ -430,20 +530,34 @@ private fun ItemView(item: Item, answerable: Boolean, progress: String?, onAnswe
 }
 
 @Composable
-private fun ThinkingBlock(item: Item.Thinking) {
+private fun ThinkingBlock(item: Item.Thinking, live: Boolean) {
     var expanded by rememberSaveable(item.key) { mutableStateOf(false) }
+    val seconds = item.endTs?.let { ((it - item.startTs) / 1000).coerceAtLeast(1) }
     Column(Modifier.fillMaxWidth().clickable { expanded = !expanded }) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("✻", color = Gray, fontSize = 12.sp, modifier = Modifier.width(18.dp))
-            Text("Thinking", color = Gray, fontSize = 13.sp, fontStyle = FontStyle.Italic)
+            Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterStart) {
+                if (live) Spinner(Gray, 12.dp) else Text("✻", color = Gray, fontSize = 12.sp)
+            }
+            Text(
+                when {
+                    live -> "Thinking…"
+                    seconds != null -> "Thought for ${seconds}s"
+                    else -> "Thought"
+                },
+                color = Gray, fontSize = 13.sp, fontStyle = FontStyle.Italic,
+            )
             Text(if (expanded) "  · tap to hide" else "  · tap to show", color = Gray.copy(alpha = 0.6f), fontSize = 11.sp)
         }
-        Text(
-            item.text,
-            Modifier.padding(start = 18.dp),
-            color = Gray, fontSize = 13.sp, fontStyle = FontStyle.Italic, lineHeight = 18.sp,
-            maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis,
-        )
+        if (expanded) {
+            Text(item.text, Modifier.padding(start = 18.dp), color = Gray, fontSize = 13.sp, fontStyle = FontStyle.Italic, lineHeight = 18.sp)
+        } else if (live) {
+            Text(
+                item.text.trimEnd().lines().takeLast(2).joinToString("\n"),
+                Modifier.padding(start = 18.dp),
+                color = Gray.copy(alpha = 0.8f), fontSize = 13.sp, fontStyle = FontStyle.Italic, lineHeight = 18.sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -461,9 +575,9 @@ private fun ToolBlock(item: Item.Tool, progress: String?) {
     }
     val lines = item.result?.trimEnd()?.lines().orEmpty()
     val long = lines.size > TOOL_PREVIEW_LINES
-    Column(Modifier.fillMaxWidth().clickable(enabled = long) { expanded = !expanded }) {
+    Column(Modifier.fillMaxWidth().padding(start = if (item.nested) 18.dp else 0.dp).clickable(enabled = long) { expanded = !expanded }) {
         Row {
-            Text("⏺", color = dot, fontSize = 12.sp, modifier = Modifier.width(18.dp).padding(top = 2.dp))
+            Dot(dot, Modifier.padding(top = 6.dp))
             Text(
                 buildString {
                     append(toolLabel(item.name))
@@ -583,8 +697,35 @@ private fun WarningBlock(item: Item.Output) {
     }
 }
 
-private val SPINNER = listOf("·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢")
+@Composable
+private fun Dot(color: androidx.compose.ui.graphics.Color, modifier: Modifier = Modifier) {
+    Box(modifier.width(18.dp), contentAlignment = Alignment.CenterStart) {
+        Canvas(Modifier.size(8.dp)) { drawCircle(color) }
+    }
+}
+
 private val VERBS = listOf("Thinking", "Working", "Pondering", "Cooking", "Brewing", "Crafting", "Tinkering", "Computing")
+
+@Composable
+fun Spinner(color: androidx.compose.ui.graphics.Color, size: Dp = 14.dp) {
+    val transition = rememberInfiniteTransition(label = "spinner")
+    val angle by transition.animateFloat(0f, 360f, infiniteRepeatable(tween(2400, easing = LinearEasing)), label = "angle")
+    val pulse by transition.animateFloat(0.55f, 1f, infiniteRepeatable(tween(650, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "pulse")
+    Canvas(Modifier.size(size)) {
+        val r = this.size.minDimension / 2f
+        rotate(angle) {
+            for (i in 0 until 6) {
+                val a = Math.PI * i / 3
+                val len = r * (if (i % 2 == 0) pulse else 1.55f - pulse)
+                drawLine(
+                    color, center,
+                    center + Offset((cos(a) * len).toFloat(), (sin(a) * len).toFloat()),
+                    strokeWidth = r * 0.32f, cap = StrokeCap.Round,
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun WorkingLine(waiting: Boolean, waitingOnCard: Boolean, activity: String?, startedAtLocal: Long) {
@@ -595,15 +736,15 @@ private fun WorkingLine(waiting: Boolean, waitingOnCard: Boolean, activity: Stri
         )
         return
     }
-    var frame by remember { mutableIntStateOf(0) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(120)
-            frame++
+            delay(1000)
             now = System.currentTimeMillis()
         }
     }
+    val shimmer by rememberInfiniteTransition(label = "shimmer")
+        .animateFloat(0.55f, 1f, infiniteRepeatable(tween(900, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "alpha")
     val verb = activity ?: VERBS[((startedAtLocal / 1000) % VERBS.size).toInt().let { if (it < 0) it + VERBS.size else it }]
     val secs = if (startedAtLocal > 0) ((now - startedAtLocal) / 1000).coerceAtLeast(0) else -1
     val elapsed = when {
@@ -611,9 +752,14 @@ private fun WorkingLine(waiting: Boolean, waitingOnCard: Boolean, activity: Stri
         secs < 60 -> "${secs}s · "
         else -> "${secs / 60}m ${(secs % 60).toString().padStart(2, '0')}s · "
     }
-    Row(Modifier.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(SPINNER[frame % SPINNER.size], color = Red, fontSize = 15.sp, modifier = Modifier.width(18.dp))
-        Text("$verb…", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-        Text("  ($elapsed tap ✕ to stop)", color = Gray, fontSize = 12.sp)
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterStart) { Spinner(Red, 13.dp) }
+        Text(
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = Red.copy(alpha = shimmer), fontWeight = FontWeight.Medium)) { append("$verb…") }
+                withStyle(SpanStyle(color = Gray)) { append("  ($elapsed" + "tap ✕ to stop)") }
+            },
+            fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
     }
 }

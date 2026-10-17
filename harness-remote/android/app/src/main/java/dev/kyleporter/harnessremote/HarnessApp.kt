@@ -97,5 +97,15 @@ class Hub(private val app: Application) {
         route.value = Route.Servers
     }
 
+    fun recentFolders(serverId: String): List<String> = runCatching {
+        val a = JSONArray(prefs.getString("recent:$serverId", "[]"))
+        (0 until a.length()).map { a.getString(it) }
+    }.getOrDefault(emptyList())
+
+    fun rememberFolder(serverId: String, path: String) {
+        val list = (listOf(path) + recentFolders(serverId).filterNot { it == path }).take(6)
+        prefs.edit().putString("recent:$serverId", JSONArray(list).toString()).apply()
+    }
+
     fun lastServer(): Server? = prefs.getString("last", null)?.let { id -> servers.value.find { it.id == id } }
 }
