@@ -35,7 +35,7 @@ data class HarnessInfo(
     val name: String,
     val description: String,
     val mode: String,
-    val models: String?,
+    val models: List<String>?,
     val requiresModel: Boolean,
     val available: Boolean,
     val reason: String?,
@@ -56,6 +56,7 @@ data class SessionSummary(
     val harness: String,
     val cwd: String,
     val model: String,
+    val provider: String,
     val createdAt: Long,
     val updatedAt: Long,
     val turns: Int,
@@ -75,6 +76,14 @@ data class BridgeEvent(
 )
 
 data class ModelInfo(val provider: String, val name: String, val params: String)
+
+data class ModelCatalog(val models: List<ModelInfo>, val errors: Map<String, String>, val lms: Boolean)
+
+fun providerLabel(provider: String): String = when (provider) {
+    "lmstudio" -> "LM Studio"
+    "ollama" -> "Ollama"
+    else -> provider
+}
 
 data class DirListing(val path: String, val parent: String?, val dirs: List<String>, val git: Boolean)
 
@@ -105,7 +114,11 @@ fun parseHarness(o: JSONObject) = HarnessInfo(
     name = o.str("name"),
     description = o.str("description"),
     mode = o.str("mode"),
-    models = o.strOrNull("models"),
+    models = when (val m = o.opt("models")) {
+        is JSONArray -> m.strings().ifEmpty { null }
+        is String -> listOf(m)
+        else -> null
+    },
     requiresModel = o.optBoolean("requiresModel"),
     available = o.optBoolean("available"),
     reason = o.strOrNull("reason"),
@@ -126,6 +139,7 @@ fun parseSession(o: JSONObject) = SessionSummary(
     harness = o.str("harness"),
     cwd = o.str("cwd"),
     model = o.str("model"),
+    provider = o.str("provider"),
     createdAt = o.optLong("createdAt"),
     updatedAt = o.optLong("updatedAt"),
     turns = o.optInt("turns"),
@@ -146,9 +160,13 @@ fun parseEvent(o: JSONObject) = BridgeEvent(
 
 fun parseEvents(a: JSONArray?) = a.mapObjects(::parseEvent)
 
-fun parseModels(o: JSONObject): List<ModelInfo> =
-    o.optJSONArray("ollama").mapObjects { ModelInfo("ollama", it.str("name"), it.str("params")) } +
-        o.optJSONArray("lmstudio").mapObjects { ModelInfo("lmstudio", it.str("name"), it.str("params")) }
+fun parseModels(o: JSONObject): ModelCatalog {
+    val models = o.optJSONArray("lmstudio").mapObjects { ModelInfo("lmstudio", it.str("name"), it.str("params")) } +
+        o.optJSONArray("ollama").mapObjects { ModelInfo("ollama", it.str("name"), it.str("params")) }
+    val errs = o.optJSONObject("errors")
+    val errors = errs?.keys()?.asSequence()?.associateWith { errs.str(it) }.orEmpty()
+    return ModelCatalog(models, errors, o.optBoolean("lms"))
+}
 
 fun parseListing(o: JSONObject) = DirListing(
     path = o.str("path"),

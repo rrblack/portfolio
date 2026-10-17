@@ -44,6 +44,7 @@ import dev.kyleporter.harnessremote.Route
 import dev.kyleporter.harnessremote.net.BridgeClient
 import dev.kyleporter.harnessremote.net.ConnState
 import dev.kyleporter.harnessremote.net.baseName
+import dev.kyleporter.harnessremote.net.providerLabel
 import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
@@ -128,7 +129,7 @@ fun SessionsScreen(hub: Hub, client: BridgeClient) {
                             }
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                listOfNotNull(harnessNames[s.harness] ?: s.harness, s.model.ifBlank { null }, baseName(s.cwd))
+                                listOfNotNull(harnessNames[s.harness] ?: s.harness, s.model.ifBlank { null }?.let { m -> if (s.provider.isNotBlank()) "$m (${providerLabel(s.provider)})" else m }, baseName(s.cwd))
                                     .joinToString(" · "),
                                 color = Gray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )

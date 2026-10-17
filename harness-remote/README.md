@@ -1,13 +1,13 @@
 # Harness Remote
 
-Control your agent harnesses (Aider, OpenCode, Goose, Codex, Claude Code, or any CLI) from an Android phone, running against **your own local models** (Ollama / LM Studio). There's no cloud relay and no account. Your phone talks straight to your computer over your LAN or Tailscale.
+Control your agent harnesses (Pi, Aider, OpenCode, Codex, Goose, Claude Code, or any CLI) from an Android phone, running against **your own local models** in LM Studio or Ollama. There's no cloud relay and no account. Your phone talks straight to your computer over your LAN or Tailscale.
 
 ```
  Android phone                          Your computer
 ┌──────────────────┐   WebSocket      ┌───────────────────────────────┐
 │ Harness Remote   │◄────────────────►│ harness-bridge.mjs (Node)     │
-│  • sessions      │  token auth      │   spawns harness CLIs ──────► │ aider / opencode / goose /
-│  • live output   │  LAN/Tailscale   │   streams stdout/stderr       │ codex --oss / claude / …
+│  • sessions      │  token auth      │   spawns harness CLIs ──────► │ pi / aider / opencode / codex
+│  • live output   │  LAN/Tailscale   │   streams stdout/stderr       │ --oss / goose / claude / …
 │  • y/n/Enter     │                  │   lists Ollama + LM Studio    │        │
 │  • notifications │                  │   models                      │        ▼
 └──────────────────┘                  └───────────────────────────────┘   Ollama :11434
@@ -26,6 +26,7 @@ As of October 2026, the closest existing options each miss one or more of *Andro
 | PhoneCMD | many CLIs | yes | direct | closed source |
 | AgentsRoom / CodeAgent Mobile | many CLIs | yes | vendor relay | commercial |
 | Ciao, Grass, Cursor Mobile | varies | no (iOS) | varies | |
+| LM Studio Bionic | its own agent | no (desktop only) | n/a | No remote control; Harness Remote uses the same LM Studio models through pi and the other harnesses instead |
 
 Harness Remote is a small open option: one dependency-free Node script on the computer and a native Kotlin/Compose app on the phone.
 
@@ -43,11 +44,11 @@ Leave the window open while you use the app. The bridge is a server: after the s
 It prints something like:
 
 ```
-Harness Bridge 0.1.1 listening on http://0.0.0.0:8787
+Harness Bridge 0.2.0 listening on http://0.0.0.0:8787
 Harnesses:
+  ✓ Pi
   ✓ Aider
-  ✓ OpenCode
-  ✗ Goose  (goose was not found on PATH)
+  ✗ OpenCode  (opencode was not found on PATH)
 Reachable at:
   http://192.168.1.20:8787  (wlan0)
   http://100.88.12.4:8787   (tailscale0, Tailscale)
@@ -60,7 +61,7 @@ Pairing code: 482913   (valid 10 minutes, one use)
 Install the APK (`android/app/build/outputs/apk/debug/app-debug.apk` after building, see below). Then:
 
 1. Tap **Add computer**, enter `192.168.1.20` (or the Tailscale `100.x` address) and the 6-digit code.
-2. Tap **New session**, pick a harness, a local model (listed live from Ollama / LM Studio) and a project folder.
+2. Tap **New session**, pick a harness, a local model (listed live from LM Studio and Ollama) and a project folder. If LM Studio's server is off, the app offers a **Start LM Studio server** button, which runs `lms server start` on the computer.
 3. Type a message. Output streams in. When the harness asks something (`[y/n]`, `?`, a prompt), the session shows **Needs input** and quick-reply keys appear.
 
 Leave the app and it keeps the connection in a foreground service. It notifies you when a turn finishes or a harness is waiting for you. Tap the notification to jump back into that session.
@@ -86,17 +87,28 @@ Transcripts are kept by the bridge in `~/.harness-remote/sessions.json`, so you 
 
 ### Built-in presets
 
-| id | Runs | Model is passed as |
-|---|---|---|
-| `aider` | `aider --message …` (+ `--restore-chat-history` after the first turn) | `--model ollama_chat/<model>`, `OLLAMA_API_BASE` |
-| `opencode` | `opencode run …` (+ `--continue`) | `--model ollama/<model>`. Needs an `ollama` provider in `opencode.json` ([docs](https://opencode.ai/docs/providers/)) |
-| `goose` | `goose run --name harness-remote-<id> --text …` (+ `--resume`) | `GOOSE_PROVIDER=ollama GOOSE_MODEL=<model>` |
-| `codex` | `codex exec --oss --local-provider ollama --sandbox workspace-write …` (+ `resume --last`) | `-m <model>` |
-| `claude-ollama` | `claude -p --permission-mode acceptEdits …` (+ `--continue`) | `--model <model>`, `ANTHROPIC_BASE_URL=<ollama>` (Ollama's Anthropic-compatible API) |
-| `ollama-chat` | `ollama run <model>` in a PTY | positional |
-| `shell` | your login shell in a PTY | n/a. **Disabled by default** |
+Most presets can run on either model server. You pick a model from the LM Studio or Ollama list in the app, and the bridge passes it the way that harness expects.
 
-Presets whose command isn't installed show up greyed out in the app. Local models usually need a bigger context window than Ollama's default for agent work. Set `OLLAMA_CONTEXT_LENGTH` (for example 32768) on the Ollama server.
+| id | Runs | LM Studio | Ollama |
+|---|---|---|---|
+| `pi` | `pi --print --session-id harness-remote-<id> … -- <prompt>` | `--provider lmstudio --model <id>` | `--provider ollama --model <tag>` |
+| `aider` | `aider --message …` (+ `--restore-chat-history`) | `--model lm_studio/<id>`, `LM_STUDIO_API_BASE` | `--model ollama_chat/<tag>`, `OLLAMA_API_BASE` |
+| `opencode` | `opencode run …` (+ `--continue`) | `--model lmstudio/<id>` | `--model ollama/<tag>` |
+| `codex` | `codex exec --oss --local-provider <server> --sandbox workspace-write …` (+ `resume --last`) | `-m <id>` | `-m <tag>` |
+| `goose` | `goose run --name harness-remote-<id> --text …` (+ `--resume`) | n/a | `GOOSE_PROVIDER=ollama GOOSE_MODEL=<tag>` |
+| `claude-ollama` | `claude -p --permission-mode acceptEdits …` (+ `--continue`) | n/a | `--model <tag>`, `ANTHROPIC_BASE_URL=<ollama>` (Ollama's Anthropic-compatible API) |
+| `ollama-chat` | `ollama run <tag>` in a PTY | n/a | positional |
+| `shell` | your login shell in a PTY | n/a | n/a. **Disabled by default** |
+
+Presets whose command isn't installed show up greyed out in the app, with the reason.
+
+- **Pi** only uses models listed in `~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR`). When you start a pi session, the bridge adds the model you picked under an `lmstudio` or `ollama` provider if it isn't there yet. It never removes or rewrites anything else, and leaves a file that isn't plain JSON untouched. Each phone session maps to its own pi session (`--session-id`), so two sessions in one folder don't share history.
+- **OpenCode** needs an `lmstudio` / `ollama` provider block in `opencode.json` ([docs](https://opencode.ai/docs/providers/)).
+- Local models usually need a bigger context window than the default for agent work. In LM Studio, raise the context length when loading the model. For Ollama, set `OLLAMA_CONTEXT_LENGTH` (for example 32768).
+
+### LM Studio Bionic
+
+[Bionic](https://lmstudio.ai/docs/bionic) is a desktop app with no CLI, API or remote-control interface, so the bridge can't drive Bionic's own agent sessions. Its models run on the LM Studio runtime, though. Any model LM Studio's server lists (Developer → Start server, or `lms server start`) shows up in the app's **LM Studio** list and works with every harness above. If a model you downloaded in Bionic doesn't appear there, open it in LM Studio, or point LM Studio's models folder at the same location.
 
 ## Configuration
 
@@ -125,13 +137,23 @@ Presets whose command isn't installed show up greyed out in the app. Local model
       "args": ["--model", "{model}", "--prompt", "{prompt}"],
       "continueArgs": ["--resume", "--model", "{model}", "--prompt", "{prompt}"],
       "env": { "OPENAI_BASE_URL": "{lmstudio}/v1" },
-      "models": "lmstudio"
+      "models": ["lmstudio"]
+    },
+    // a harness that works with both servers
+    {
+      "id": "my-agent-2",
+      "command": "my-agent",
+      "args": ["{modelArgs}", "--prompt", "{prompt}"],
+      "backends": {
+        "lmstudio": { "modelArgs": ["--base-url", "{lmstudio}/v1", "--model", "{model}"] },
+        "ollama": { "modelArgs": ["--base-url", "{ollama}/v1", "--model", "{model}"] }
+      }
     }
   ]
 }
 ```
 
-Placeholders: `{prompt}` `{model}` `{session}` `{cwd}` `{ollama}` `{lmstudio}`. An argument that is exactly `{modelArgs}` expands to the harness's `modelArgs` when a model is picked, and to nothing otherwise. `modelEnv` is applied only when a model is picked. Arguments go straight to the process with no shell in between, so nothing you type on the phone is shell-interpreted. Other fields: `pty: true`, `stdin: "pipe"`, `requiresModel: true`.
+Placeholders: `{prompt}` `{model}` `{provider}` (`lmstudio` or `ollama`) `{session}` `{cwd}` `{ollama}` `{lmstudio}`. An argument that is exactly `{modelArgs}` expands to the harness's `modelArgs` when a model is picked, and to nothing otherwise. `modelEnv` is applied only when a model is picked. Arguments go straight to the process with no shell in between, so nothing you type on the phone is shell-interpreted. Other fields: `pty: true`, `stdin: "pipe"`, `requiresModel: true`.
 
 Check what the bridge will offer with `node harness-bridge.mjs --print-config`.
 
@@ -151,9 +173,10 @@ JSON over a WebSocket at `/ws` (`Authorization: Bearer <token>`). Requests carry
 | Client → bridge | Reply |
 |---|---|
 | `hello` | `{t:"hello", host, version, roots, harnesses[], sessions[]}` (also sent on connect) |
-| `models` | `{t:"models", ollama[], lmstudio[]}` |
+| `models` | `{t:"models", lmstudio[], ollama[], errors{}, lms}` |
+| `lms-start` | runs `lms server start`, then replies like `models` |
 | `ls {path}` | `{t:"ls", path, parent, dirs[], git}` |
-| `create {harness, cwd, model, title}` | `{t:"created", session}` |
+| `create {harness, cwd, model, provider, title}` | `{t:"created", session}` |
 | `subscribe {id, after}` | `{t:"history", events[]}`, then live `{t:"event", id, ev}` |
 | `send {id, text}` · `stdin {id, data}` · `stop {id}` · `restart {id}` · `rename {id, title}` · `delete {id}` | `{t:"ok"}` or `{t:"error", error}` |
 
@@ -177,4 +200,6 @@ The bridge also pushes `{t:"sessions", sessions[]}` whenever any session changes
 | Every harness shows ✗ | None are installed or on `PATH` in that terminal. Install one, open a new terminal, and run the bridge again. |
 | Bridge runs but the phone can't connect | Phone and computer must be on the same Wi-Fi (or both on Tailscale). Use an address from the "Reachable at" list, not `0.0.0.0`. On Windows, allow Node.js through Windows Defender Firewall for **Private** networks and set the Wi-Fi network to Private. |
 | "Pairing code expired" | Codes last 10 minutes and work once. Restart the bridge for a new one. |
-| Models list is empty | Ollama isn't running, or isn't on `127.0.0.1:11434`. Set `"ollama"` in the config. `OLLAMA_HOST=0.0.0.0` is handled. |
+| LM Studio models list is empty | Start LM Studio's server (Developer → Start server, the app's button, or `lms server start`). The bridge expects it on `127.0.0.1:1234`. Change `"lmstudio"` in the config if you moved it. |
+| Ollama models list is empty | Ollama isn't running, or isn't on `127.0.0.1:11434`. Set `"ollama"` in the config. `OLLAMA_HOST=0.0.0.0` is handled. |
+| Pi says the model isn't found | Check `~/.pi/agent/models.json`. The bridge adds the model under `lmstudio`/`ollama`, but if you already had that provider pointing elsewhere, it keeps your `baseUrl`. |

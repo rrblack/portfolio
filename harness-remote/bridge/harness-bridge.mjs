@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 1024 * 1024;
@@ -100,7 +100,25 @@ function localUrl(value, defaultPort) {
 // Placeholders: {prompt} {model} {session} {cwd} {ollama} {lmstudio}
 // "{modelArgs}" as a whole arg is replaced by modelArgs when a model is chosen, removed otherwise.
 // mode "turn": one process per message, stdin closed unless stdin: 'pipe'. mode "interactive": one long-lived process, messages go to stdin.
+// backends: per model server overrides (modelArgs, env, modelEnv, args, continueArgs). The first one is the default.
+const LMSTUDIO = 'lmstudio';
+const OLLAMA = 'ollama';
+const PROVIDERS = [LMSTUDIO, OLLAMA];
+
 const PRESETS = [
+  {
+    id: 'pi',
+    name: 'Pi',
+    description: 'pi --print with its own pi session per phone session. The bridge adds the model you pick to ~/.pi/agent/models.json if it is missing.',
+    mode: 'turn',
+    command: 'pi',
+    args: ['--print', '--session-id', 'harness-remote-{session}', '{modelArgs}', '--', '{prompt}'],
+    backends: {
+      [LMSTUDIO]: { modelArgs: ['--provider', 'lmstudio', '--model', '{model}'], piProvider: { key: 'lmstudio', baseUrl: '{lmstudio}/v1', apiKey: 'lm-studio' } },
+      [OLLAMA]: { modelArgs: ['--provider', 'ollama', '--model', '{model}'], piProvider: { key: 'ollama', baseUrl: '{ollama}/v1', apiKey: 'ollama' } },
+    },
+    requiresModel: true,
+  },
   {
     id: 'aider',
     name: 'Aider',
@@ -109,20 +127,34 @@ const PRESETS = [
     command: 'aider',
     args: ['{modelArgs}', '--yes-always', '--no-pretty', '--no-fancy-input', '--no-check-update', '--no-show-release-notes', '--no-show-model-warnings', '--message', '{prompt}'],
     continueArgs: ['{modelArgs}', '--yes-always', '--no-pretty', '--no-fancy-input', '--no-check-update', '--no-show-release-notes', '--no-show-model-warnings', '--restore-chat-history', '--message', '{prompt}'],
-    modelArgs: ['--model', 'ollama_chat/{model}'],
-    env: { OLLAMA_API_BASE: '{ollama}' },
-    models: 'ollama',
+    backends: {
+      [LMSTUDIO]: { modelArgs: ['--model', 'lm_studio/{model}'], env: { LM_STUDIO_API_BASE: '{lmstudio}/v1', LM_STUDIO_API_KEY: 'dummy-api-key' } },
+      [OLLAMA]: { modelArgs: ['--model', 'ollama_chat/{model}'], env: { OLLAMA_API_BASE: '{ollama}' } },
+    },
   },
   {
     id: 'opencode',
     name: 'OpenCode',
-    description: 'opencode run, continuing the last session in the working directory. Needs an "ollama" provider in opencode.json.',
+    description: 'opencode run, continuing the last session in the working directory. Needs an "lmstudio" or "ollama" provider in opencode.json.',
     mode: 'turn',
     command: 'opencode',
     args: ['run', '{modelArgs}', '{prompt}'],
     continueArgs: ['run', '--continue', '{modelArgs}', '{prompt}'],
-    modelArgs: ['--model', 'ollama/{model}'],
-    models: 'ollama',
+    backends: {
+      [LMSTUDIO]: { modelArgs: ['--model', 'lmstudio/{model}'] },
+      [OLLAMA]: { modelArgs: ['--model', 'ollama/{model}'] },
+    },
+  },
+  {
+    id: 'codex',
+    name: 'Codex (local OSS)',
+    description: 'codex exec --oss against a local model.',
+    mode: 'turn',
+    command: 'codex',
+    args: ['exec', '--oss', '--local-provider', '{provider}', '--sandbox', 'workspace-write', '--skip-git-repo-check', '{modelArgs}', '{prompt}'],
+    continueArgs: ['exec', '--oss', '--local-provider', '{provider}', '--sandbox', 'workspace-write', '--skip-git-repo-check', '{modelArgs}', 'resume', '--last', '{prompt}'],
+    modelArgs: ['-m', '{model}'],
+    backends: { [LMSTUDIO]: {}, [OLLAMA]: {} },
   },
   {
     id: 'goose',
@@ -132,19 +164,9 @@ const PRESETS = [
     command: 'goose',
     args: ['run', '--name', 'harness-remote-{session}', '--text', '{prompt}'],
     continueArgs: ['run', '--name', 'harness-remote-{session}', '--resume', '--text', '{prompt}'],
-    modelEnv: { GOOSE_PROVIDER: 'ollama', GOOSE_MODEL: '{model}', OLLAMA_HOST: '{ollama}' },
-    models: 'ollama',
-  },
-  {
-    id: 'codex',
-    name: 'Codex (local OSS)',
-    description: 'codex exec --oss against a local Ollama model.',
-    mode: 'turn',
-    command: 'codex',
-    args: ['exec', '--oss', '--local-provider', 'ollama', '--sandbox', 'workspace-write', '--skip-git-repo-check', '{modelArgs}', '{prompt}'],
-    continueArgs: ['exec', '--oss', '--local-provider', 'ollama', '--sandbox', 'workspace-write', '--skip-git-repo-check', '{modelArgs}', 'resume', '--last', '{prompt}'],
-    modelArgs: ['-m', '{model}'],
-    models: 'ollama',
+    backends: {
+      [OLLAMA]: { modelEnv: { GOOSE_PROVIDER: 'ollama', GOOSE_MODEL: '{model}', OLLAMA_HOST: '{ollama}' } },
+    },
   },
   {
     id: 'claude-ollama',
@@ -154,10 +176,13 @@ const PRESETS = [
     command: 'claude',
     args: ['-p', '--permission-mode', 'acceptEdits', '{modelArgs}', '{prompt}'],
     continueArgs: ['-p', '--continue', '--permission-mode', 'acceptEdits', '{modelArgs}', '{prompt}'],
-    modelArgs: ['--model', '{model}'],
-    env: { ANTHROPIC_BASE_URL: '{ollama}', ANTHROPIC_AUTH_TOKEN: 'ollama', ANTHROPIC_API_KEY: '' },
-    modelEnv: { ANTHROPIC_DEFAULT_HAIKU_MODEL: '{model}' },
-    models: 'ollama',
+    backends: {
+      [OLLAMA]: {
+        modelArgs: ['--model', '{model}'],
+        env: { ANTHROPIC_BASE_URL: '{ollama}', ANTHROPIC_AUTH_TOKEN: 'ollama', ANTHROPIC_API_KEY: '' },
+        modelEnv: { ANTHROPIC_DEFAULT_HAIKU_MODEL: '{model}' },
+      },
+    },
   },
   {
     id: 'ollama-chat',
@@ -167,7 +192,7 @@ const PRESETS = [
     pty: true,
     command: 'ollama',
     args: ['run', '{model}'],
-    models: 'ollama',
+    backends: { [OLLAMA]: {} },
     requiresModel: true,
   },
   {
@@ -182,11 +207,25 @@ const PRESETS = [
   },
 ];
 
+function providersOf(h) {
+  if (h.backends) return Object.keys(h.backends).filter((k) => PROVIDERS.includes(k));
+  if (Array.isArray(h.models)) return h.models;
+  return h.models ? [h.models] : [];
+}
+
+function withBackend(h, provider) {
+  const b = (h.backends && h.backends[provider]) || {};
+  return { ...h, ...b, env: { ...(h.env || {}), ...(b.env || {}) }, modelEnv: { ...(h.modelEnv || {}), ...(b.modelEnv || {}) } };
+}
+
 function harnessList() {
   const byId = new Map(PRESETS.map((h) => [h.id, { ...h, preset: true }]));
   for (const h of config.harnesses) {
     if (!h || !h.id) continue;
-    byId.set(h.id, { ...(byId.get(h.id) || {}), ...h });
+    const base = byId.get(h.id) || {};
+    const merged = { ...base, ...h };
+    if (h.models && !h.backends) delete merged.backends;
+    byId.set(h.id, merged);
   }
   return [...byId.values()].filter((h) => !h.disabled && h.command);
 }
@@ -244,7 +283,7 @@ function publicHarness(h) {
     name: h.name || h.id,
     description: h.description || '',
     mode: h.mode === 'interactive' ? 'interactive' : 'turn',
-    models: h.models || null,
+    models: providersOf(h).length ? providersOf(h) : null,
     requiresModel: !!h.requiresModel,
     available: !unavailableReason(h),
     reason: unavailableReason(h),
@@ -346,17 +385,83 @@ async function fetchJson(url, ms = 1500) {
   }
 }
 
+function lmsPath() {
+  const bundled = path.join(os.homedir(), '.lmstudio', 'bin', IS_WIN ? 'lms.exe' : 'lms');
+  return which('lms') || (fs.existsSync(bundled) ? bundled : null);
+}
+
+async function lmStudioModels() {
+  const isChat = (m) => !m.type || m.type === 'llm' || m.type === 'vlm';
+  try {
+    const j = await fetchJson(`${config.lmstudio}/api/v0/models`);
+    return (j.data || []).filter(isChat).map((m) => ({
+      name: m.id, size: 0, family: m.arch || '',
+      params: [m.quantization, m.state === 'loaded' ? 'loaded' : ''].filter(Boolean).join(' · '),
+    }));
+  } catch {
+    const j = await fetchJson(`${config.lmstudio}/v1/models`);
+    return (j.data || []).filter((m) => !/embed/i.test(m.id)).map((m) => ({ name: m.id, size: 0, family: '', params: '' }));
+  }
+}
+
 async function listModels() {
-  const result = { ollama: [], lmstudio: [], errors: {} };
+  const result = { ollama: [], lmstudio: [], errors: {}, lms: !!lmsPath() };
   await Promise.all([
     fetchJson(`${config.ollama}/api/tags`).then((j) => {
       result.ollama = (j.models || []).map((m) => ({ name: m.name, size: m.size || 0, family: m.details?.family || '', params: m.details?.parameter_size || '' }));
-    }).catch((e) => { result.errors.ollama = String(e.message || e); }),
-    fetchJson(`${config.lmstudio}/v1/models`).then((j) => {
-      result.lmstudio = (j.data || []).map((m) => ({ name: m.id, size: 0, family: '', params: '' }));
-    }).catch((e) => { result.errors.lmstudio = String(e.message || e); }),
+    }).catch(() => { result.errors.ollama = `Ollama is not answering at ${config.ollama}.`; }),
+    lmStudioModels().then((list) => { result.lmstudio = list; }).catch(() => {
+      result.errors.lmstudio = `LM Studio's server is not running at ${config.lmstudio}. Start it in LM Studio (Developer → Start server) or with "lms server start".`;
+    }),
   ]);
   return result;
+}
+
+function startLmStudio() {
+  const lms = lmsPath();
+  if (!lms) return Promise.reject(new Error('The lms command was not found. Start the server from the LM Studio app instead.'));
+  return new Promise((resolve, reject) => {
+    let out = '';
+    const child = spawn(lms, ['server', 'start'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const timer = setTimeout(() => { child.kill(); reject(new Error('lms server start timed out')); }, 60000);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stripAnsi(out).trim());
+      else reject(new Error(stripAnsi(out).trim() || `lms exited with code ${code}`));
+    });
+  });
+}
+
+// pi only sees models listed in its models.json, so add the one the phone picked.
+function ensurePiModel(spec, model, vars) {
+  const envDir = process.env.PI_CODING_AGENT_DIR;
+  const dir = envDir ? path.resolve(envDir.replace(/^~(?=$|[\\/])/, os.homedir())) : path.join(os.homedir(), '.pi', 'agent');
+  const file = path.join(dir, 'models.json');
+  let data = {};
+  if (fs.existsSync(file)) {
+    try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {
+      throw new Error(`${file} is not plain JSON (${e.message}). Add a "${spec.key}" provider with model "${model}" by hand.`);
+    }
+  }
+  if (!data.providers || typeof data.providers !== 'object') data.providers = {};
+  let provider = data.providers[spec.key];
+  let changed = false;
+  if (!provider) {
+    provider = data.providers[spec.key] = { baseUrl: fill(spec.baseUrl, vars), api: 'openai-completions', apiKey: spec.apiKey, models: [] };
+    changed = true;
+  }
+  if (!Array.isArray(provider.models)) provider.models = [];
+  if (!provider.models.some((m) => m && m.id === model)) {
+    provider.models.push({ id: model });
+    changed = true;
+  }
+  if (!changed) return null;
+  fs.mkdirSync(dir, { recursive: true });
+  saveJson(file, data);
+  return file;
 }
 
 // ---------------------------------------------------------------- sessions
@@ -366,6 +471,7 @@ for (const s of loadJson(sessionsPath, [])) {
   if (!s || !s.id) continue;
   s.state = s.state === 'running' || s.state === 'waiting' ? 'idle' : s.state || 'idle';
   if (!s.events) s.events = [];
+  if (s.provider == null) s.provider = OLLAMA;
   if (!s.seq) s.seq = s.events.length ? s.events[s.events.length - 1].seq : 0;
   sessions.set(s.id, s);
 }
@@ -376,7 +482,7 @@ function scheduleSave() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    const data = [...sessions.values()].map(({ id, title, harness, cwd, model, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, createdAt, updatedAt, turns, state, seq, events }));
+    const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, createdAt, updatedAt, turns, state, seq, events }));
     try { saveJson(sessionsPath, data, 0o600); } catch (e) { console.error('save failed:', e.message); }
   }, 1000);
 }
@@ -384,7 +490,7 @@ function scheduleSave() {
 function summary(s) {
   const last = [...s.events].reverse().find((e) => e.kind === 'user' || e.kind === 'out');
   return {
-    id: s.id, title: s.title, harness: s.harness, cwd: s.cwd, model: s.model,
+    id: s.id, title: s.title, harness: s.harness, cwd: s.cwd, model: s.model, provider: s.provider || '',
     createdAt: s.createdAt, updatedAt: s.updatedAt, turns: s.turns, state: s.state, seq: s.seq,
     preview: last ? stripAnsi(last.text || '').trim().slice(-160) : '',
   };
@@ -412,30 +518,42 @@ function setState(s, state) {
   scheduleSave();
 }
 
-function createSession({ harness, cwd, model, title }) {
+function createSession({ harness, cwd, model, provider, title }) {
   const h = harnessList().find((x) => x.id === harness);
   if (!h) throw new Error(`Unknown harness: ${harness}`);
   const reason = unavailableReason(h);
   if (reason) throw new Error(`${h.name || h.id}: ${reason}`);
   if (h.requiresModel && !model) throw new Error(`${h.name || h.id} needs a model`);
+  const providers = providersOf(h);
+  const backend = providers.includes(provider) ? provider : providers[0] || '';
   const dir = insideRoots(cwd || realRoots()[0] || os.homedir());
   if (!dir || !safeIsDir(dir)) throw new Error('Working directory is missing or outside the allowed roots');
   const id = crypto.randomBytes(6).toString('hex');
   const now = Date.now();
   const s = {
-    id, harness: h.id, cwd: dir, model: model || '', turns: 0, state: 'idle', seq: 0, events: [],
+    id, harness: h.id, cwd: dir, model: model || '', provider: backend, turns: 0, state: 'idle', seq: 0, events: [],
     title: (title || '').trim() || `${h.name || h.id} · ${path.basename(dir)}`,
     createdAt: now, updatedAt: now,
   };
   sessions.set(id, s);
-  pushEvent(s, { kind: 'status', text: `Session created: ${h.name || h.id} in ${dir}${model ? ` with ${model}` : ''}` });
+  const via = backend === LMSTUDIO ? ' (LM Studio)' : backend === OLLAMA ? ' (Ollama)' : '';
+  pushEvent(s, { kind: 'status', text: `Session created: ${h.name || h.id} in ${dir}${model ? ` with ${model}${via}` : ''}` });
   if (h.mode === 'interactive') startProcess(s, h, null);
   broadcastSessions();
   return s;
 }
 
-function startProcess(s, h, prompt) {
-  const vars = { prompt: prompt ?? '', model: s.model, session: s.id, cwd: s.cwd, ollama: config.ollama, lmstudio: config.lmstudio };
+function startProcess(s, harness, prompt) {
+  const h = withBackend(harness, s.provider);
+  const vars = { prompt: prompt ?? '', model: s.model, provider: s.provider || '', session: s.id, cwd: s.cwd, ollama: config.ollama, lmstudio: config.lmstudio };
+  if (h.piProvider && s.model) {
+    try {
+      const file = ensurePiModel(h.piProvider, s.model, vars);
+      if (file) pushEvent(s, { kind: 'status', text: `Added ${h.piProvider.key}/${s.model} to ${file}` });
+    } catch (e) {
+      pushEvent(s, { kind: 'err', text: `${e.message}\n` });
+    }
+  }
   const template = h.mode === 'turn' && s.turns > 0 && h.continueArgs ? h.continueArgs : h.args || [];
   let cmd = which(h.command) || h.command;
   let args = buildArgs(template, h, vars);
@@ -699,6 +817,10 @@ async function handle(c, raw) {
       case 'hello': return reply(hello());
       case 'list': return reply({ t: 'sessions', sessions: sortedSummaries() });
       case 'models': return reply({ t: 'models', ...(await listModels()) });
+      case 'lms-start': {
+        const output = await startLmStudio();
+        return reply({ t: 'models', output, ...(await listModels()) });
+      }
       case 'ls': return reply({ t: 'ls', ...listDir(msg.path) });
       case 'create': {
         const s = createSession(msg);
@@ -860,7 +982,7 @@ function shutdown() {
   for (const s of sessions.values()) stopSession(s, 'SIGTERM');
   clearTimeout(saveTimer);
   saveTimer = null;
-  const data = [...sessions.values()].map(({ id, title, harness, cwd, model, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
+  const data = [...sessions.values()].map(({ id, title, harness, cwd, model, provider, createdAt, updatedAt, turns, state, seq, events }) => ({ id, title, harness, cwd, model, provider, createdAt, updatedAt, turns, state: state === 'running' || state === 'waiting' ? 'idle' : state, seq, events }));
   try { saveJson(sessionsPath, data, 0o600); } catch {}
   process.exit(0);
 }

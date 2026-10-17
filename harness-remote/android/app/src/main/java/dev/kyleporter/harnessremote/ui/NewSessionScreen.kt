@@ -51,7 +51,8 @@ import dev.kyleporter.harnessremote.Hub
 import dev.kyleporter.harnessremote.Route
 import dev.kyleporter.harnessremote.net.BridgeClient
 import dev.kyleporter.harnessremote.net.DirListing
-import dev.kyleporter.harnessremote.net.ModelInfo
+import dev.kyleporter.harnessremote.net.ModelCatalog
+import dev.kyleporter.harnessremote.net.providerLabel
 import dev.kyleporter.harnessremote.net.baseName
 import dev.kyleporter.harnessremote.net.childPath
 import kotlinx.coroutines.launch
@@ -63,8 +64,10 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
     val scope = rememberCoroutineScope()
     val harnesses = hello?.harnesses.orEmpty()
     var harnessId by remember { mutableStateOf(harnesses.firstOrNull { it.available }?.id) }
-    var models by remember { mutableStateOf<List<ModelInfo>?>(null) }
+    var catalog by remember { mutableStateOf<ModelCatalog?>(null) }
     var model by remember { mutableStateOf("") }
+    var provider by remember { mutableStateOf("") }
+    var startingLms by remember { mutableStateOf(false) }
     var listing by remember { mutableStateOf<DirListing?>(null) }
     var title by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
@@ -83,11 +86,19 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
     }
     LaunchedEffect(Unit) {
         browse(null)
-        models = runCatching { client.models() }.getOrDefault(emptyList())
-        if (model.isBlank()) models?.firstOrNull()?.let { model = it.name }
+        catalog = runCatching { client.models() }.getOrElse { error = it.message; ModelCatalog(emptyList(), emptyMap(), false) }
     }
 
     val harness = harnesses.find { it.id == harnessId }
+
+    LaunchedEffect(harnessId, catalog) {
+        val providers = harness?.models ?: return@LaunchedEffect
+        if (provider !in providers) provider = providers.first()
+        val known = catalog?.models.orEmpty().filter { it.provider in providers }
+        if (known.none { it.name == model && it.provider == provider }) {
+            known.minByOrNull { providers.indexOf(it.provider) }?.let { model = it.name; provider = it.provider }
+        }
+    }
 
     Scaffold(
         containerColor = Black,
@@ -129,24 +140,51 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                 }
             }
 
-            if (harness?.models != null) {
+            val providers = harness?.models
+            if (providers != null) {
                 Section("Model")
-                when (val m = models) {
-                    null -> Text("Asking Ollama and LM Studio…", color = Gray, fontSize = 13.sp)
-                    else -> {
-                        val relevant = m.filter { it.provider == harness.models }.ifEmpty { m }
-                        if (relevant.isEmpty()) {
-                            Text("No local models found. Is Ollama running on the computer? You can still type a name.", color = Gray, fontSize = 13.sp)
+                when (val cat = catalog) {
+                    null -> Text("Asking LM Studio and Ollama…", color = Gray, fontSize = 13.sp)
+                    else -> providers.forEach { p ->
+                        val list = cat.models.filter { it.provider == p }
+                        Text(providerLabel(p), color = OffWhite, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        cat.errors[p]?.let { msg ->
+                            Text(msg, color = Gray, fontSize = 12.sp)
+                            if (p == "lmstudio" && cat.lms) {
+                                TextButton(enabled = !startingLms, onClick = {
+                                    startingLms = true
+                                    scope.launch {
+                                        runCatching { client.startLmStudio() }
+                                            .onSuccess { catalog = it }
+                                            .onFailure { error = it.message }
+                                        startingLms = false
+                                    }
+                                }) { Text(if (startingLms) "Starting LM Studio server…" else "Start LM Studio server", color = Red) }
+                            }
                         }
+                        if (list.isEmpty() && cat.errors[p] == null) Text("No models downloaded", color = Gray, fontSize = 12.sp)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            relevant.forEach { info ->
+                            list.forEach { info ->
                                 FilterChip(
-                                    selected = model == info.name,
-                                    onClick = { model = info.name },
+                                    selected = model == info.name && provider == p,
+                                    onClick = { model = info.name; provider = p },
                                     label = { Text(info.name + if (info.params.isNotBlank()) " · ${info.params}" else "", fontSize = 12.sp) },
                                     colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Red.copy(alpha = 0.25f)),
                                 )
                             }
+                        }
+                    }
+                }
+                if (providers.size > 1) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Served by", color = Gray, fontSize = 12.sp)
+                        providers.forEach { p ->
+                            FilterChip(
+                                selected = provider == p,
+                                onClick = { provider = p },
+                                label = { Text(providerLabel(p), fontSize = 12.sp) },
+                                colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Red.copy(alpha = 0.25f)),
+                            )
                         }
                     }
                 }
@@ -187,7 +225,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     error = null
                     scope.launch {
                         try {
-                            val s = client.create(h.id, dir, if (h.models != null) model else "", title)
+                            val s = client.create(h.id, dir, if (h.models != null) model else "", if (h.models != null) provider else "", title)
                             hub.route.value = Route.Session(s.id)
                         } catch (e: Exception) {
                             error = e.message

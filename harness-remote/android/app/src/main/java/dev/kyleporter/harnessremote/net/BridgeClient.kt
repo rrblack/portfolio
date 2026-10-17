@@ -193,13 +193,15 @@ class BridgeClient(val server: Server, private val http: OkHttpClient) {
         synced.add(id)
     }
 
-    suspend fun models(): List<ModelInfo> = parseModels(request("models"))
+    suspend fun models(): ModelCatalog = parseModels(request("models"))
+
+    suspend fun startLmStudio(): ModelCatalog = parseModels(request("lms-start"))
 
     suspend fun listDir(path: String?): DirListing = parseListing(request("ls") { if (path != null) put("path", path) })
 
-    suspend fun create(harness: String, cwd: String, model: String, title: String): SessionSummary {
+    suspend fun create(harness: String, cwd: String, model: String, provider: String, title: String): SessionSummary {
         val r = request("create") {
-            put("harness", harness); put("cwd", cwd); put("model", model); put("title", title)
+            put("harness", harness); put("cwd", cwd); put("model", model); put("provider", provider); put("title", title)
         }
         val s = parseSession(r.getJSONObject("session"))
         subscribed.add(s.id)
