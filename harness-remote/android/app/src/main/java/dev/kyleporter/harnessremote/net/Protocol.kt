@@ -134,6 +134,33 @@ fun childPath(dir: String, name: String): String {
     return dir.trimEnd('/', '\\') + sep + name
 }
 
+/**
+ * What to list for folder suggestions while a path is typed: the folder to look in and the start of the name.
+ * "C:\\Prog" → ("C:\\", "Prog"); a bare name like "Docu" looks in the folder that is open.
+ */
+fun completionTarget(typed: String, current: String?): Pair<String, String>? {
+    val t = typed.trim().trim('"')
+    if (t.isEmpty()) return null
+    if (Regex("^[A-Za-z]:$").matches(t)) return "$t\\" to ""
+    val cut = t.lastIndexOfAny(charArrayOf('/', '\\'))
+    if (cut < 0) return (current ?: return null) to t
+    val dir = t.substring(0, cut + 1)
+    val absolute = Regex("^([A-Za-z]:|[/\\\\~])").containsMatchIn(dir)
+    return (if (absolute || current == null) dir else childPath(current, dir.trimEnd('/', '\\'))) to t.substring(cut + 1)
+}
+
+/** Folder names matching what was typed: exact first, then names that start with it, then names that contain it. */
+fun rankFolders(dirs: List<String>, prefix: String): List<String> {
+    val p = prefix.lowercase()
+    if (p.isEmpty()) return dirs
+    val exact = dirs.filter { it.lowercase() == p }
+    val starts = dirs.filter { it.lowercase().startsWith(p) && it.lowercase() != p }
+    val contains = dirs.filter { p in it.lowercase() && !it.lowercase().startsWith(p) }
+    return exact + starts + contains
+}
+
+fun isFilesystemRoot(path: String): Boolean = path == "/" || Regex("^[A-Za-z]:[\\\\/]?$").matches(path)
+
 fun JSONObject.str(key: String): String = if (isNull(key)) "" else optString(key, "")
 
 fun JSONObject.strOrNull(key: String): String? = if (isNull(key)) null else optString(key)

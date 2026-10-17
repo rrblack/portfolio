@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.9.1';
+const VERSION = '0.9.2';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -77,7 +77,12 @@ if (config.port == null) config.port = 8787;
 if (config.host == null) config.host = '0.0.0.0';
 // Older versions wrote the home folder here by default, which hid C:\, Program Files and other drives
 // from the folder picker. That default is now the whole computer; a list the user chose is kept.
-if (config.roots == null || (Array.isArray(config.roots) && config.roots.length === 1 && config.roots[0] === os.homedir() && !config.rootsChosen)) {
+const normDir = (p) => {
+  const r = path.resolve(String(p).replace(/^~(?=$|[\\/])/, os.homedir())).replace(/[\\/]+$/, '');
+  return IS_WIN ? r.toLowerCase() : r;
+};
+const homeOnly = (roots) => [].concat(roots).length === 1 && normDir([].concat(roots)[0]) === normDir(os.homedir());
+if (config.roots == null || (!config.rootsChosen && config.roots !== 'all' && homeOnly(config.roots))) {
   if (config.roots != null) console.log('Folder picker: now opens the whole computer instead of only your user folder. Set "roots" in config.json (and "rootsChosen": true) to limit it.');
   config.roots = 'all';
   configDirty = true;

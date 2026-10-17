@@ -49,6 +49,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -61,6 +62,10 @@ import dev.kyleporter.harnessremote.net.ModelCatalog
 import dev.kyleporter.harnessremote.net.providerLabel
 import dev.kyleporter.harnessremote.net.baseName
 import dev.kyleporter.harnessremote.net.childPath
+import dev.kyleporter.harnessremote.net.completionTarget
+import dev.kyleporter.harnessremote.net.isFilesystemRoot
+import dev.kyleporter.harnessremote.net.rankFolders
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -81,6 +86,7 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
     var error by remember { mutableStateOf<String?>(null) }
     var folderError by remember { mutableStateOf<String?>(null) }
     var typedPath by remember { mutableStateOf("") }
+    var suggestions by remember { mutableStateOf<List<String>?>(null) }
     var busy by remember { mutableStateOf(false) }
 
     val recent = remember { hub.recentFolders(client.server.id) }
@@ -91,6 +97,21 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                 .onSuccess { listing = it; folderError = null; typedPath = "" }
                 .onFailure { if (fallback) browse(null) else folderError = it.message }
         }
+    }
+
+    // Folders matching what is typed, refreshed as you type: a bare name filters the open folder,
+    // a path like C:\Prog lists C:\ and keeps the folders that start with "Prog".
+    LaunchedEffect(typedPath, listing?.path) {
+        val target = completionTarget(typedPath, listing?.path)
+        if (target == null) { suggestions = null; return@LaunchedEffect }
+        delay(150)
+        val dir = runCatching { client.listDir(target.first) }.getOrNull()
+        suggestions = dir?.let { d -> rankFolders(d.dirs, target.second).take(40).map { childPath(d.path, it) } }.orEmpty()
+    }
+
+    fun openTyped() {
+        val target = completionTarget(typedPath, listing?.path) ?: return
+        browse(if (target.second.isEmpty()) target.first else suggestions?.firstOrNull() ?: childPath(target.first, target.second))
     }
 
     LaunchedEffect(hello) {
@@ -264,6 +285,15 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                         )
                     }
                 }
+                if (l.parent == null && !isFilesystemRoot(l.path)) {
+                    val v = hello?.version.orEmpty()
+                    val old = v.split('.').mapNotNull { it.toIntOrNull() }.let { (it.getOrElse(0) { 0 } * 1000 + it.getOrElse(1) { 0 }) * 1000 + it.getOrElse(2) { 0 } } < 9001
+                    Text(
+                        if (old) "Can't go above this folder: the bridge on your PC is version ${v.ifBlank { "unknown" }}, which only allows ${roots.joinToString()}. Close its window, start the new harness-bridge.mjs, and the whole drive opens up."
+                        else "Can't go above this folder: the bridge only allows ${roots.joinToString()}. Set \"roots\": \"all\" in .harness-remote\\config.json on your PC and restart the bridge to open the whole drive.",
+                        color = Amber, fontSize = 12.sp,
+                    )
+                }
                 if (l.drives.isNotEmpty()) {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         l.drives.forEach { d ->
@@ -282,11 +312,11 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     textStyle = LocalTextStyle.current.copy(fontFamily = Mono, fontSize = 13.sp),
-                    placeholder = { Text("Or type a path, e.g. C:\\Program Files", fontSize = 13.sp, color = Gray) },
+                    placeholder = { Text("Type a folder name or a path, e.g. C:\\Prog…", fontSize = 13.sp, color = Gray) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                    keyboardActions = KeyboardActions(onGo = { if (typedPath.isNotBlank()) browse(typedPath) }),
+                    keyboardActions = KeyboardActions(onGo = { openTyped() }),
                     trailingIcon = {
-                        if (typedPath.isNotBlank()) IconButton(onClick = { browse(typedPath) }) { Icon(Icons.Filled.Check, "Open this path", tint = Red) }
+                        if (typedPath.isNotBlank()) IconButton(onClick = { openTyped() }) { Icon(Icons.Filled.Check, "Open this path", tint = Red) }
                     },
                 )
                 folderError?.let { Text(it, color = Red, fontSize = 12.sp) }
@@ -298,11 +328,26 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     Modifier.fillMaxWidth().heightIn(max = 320.dp).background(Surface, RoundedCornerShape(10.dp))
                         .verticalScroll(rememberScrollState()),
                 ) {
-                    l.parent?.let { parent ->
-                        DirRow("↑  up to ${baseName(parent)}") { browse(parent) }
+                    val matches = suggestions
+                    if (typedPath.isNotBlank() && matches != null) {
+                        matches.forEach { full ->
+                            val parent = full.trimEnd('/', '\\').dropLast(baseName(full).length)
+                            Row(
+                                Modifier.fillMaxWidth().clickable { browse(full) }.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("${baseName(full)}/", fontFamily = Mono, fontSize = 13.sp, color = OffWhite)
+                                Text("  $parent", fontFamily = Mono, fontSize = 11.sp, color = Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        if (matches.isEmpty()) Text("No folders match", Modifier.padding(12.dp), color = Gray, fontSize = 13.sp)
+                    } else {
+                        l.parent?.let { parent ->
+                            DirRow("↑  up to ${baseName(parent)}") { browse(parent) }
+                        }
+                        l.dirs.forEach { d -> DirRow("$d/") { browse(childPath(l.path, d)) } }
+                        if (l.dirs.isEmpty()) Text("No subfolders", Modifier.padding(12.dp), color = Gray, fontSize = 13.sp)
                     }
-                    l.dirs.forEach { d -> DirRow("$d/") { browse(childPath(l.path, d)) } }
-                    if (l.dirs.isEmpty()) Text("No subfolders", Modifier.padding(12.dp), color = Gray, fontSize = 13.sp)
                 }
             } ?: Text(folderError ?: "Loading…", color = if (folderError != null) Red else Gray)
 
