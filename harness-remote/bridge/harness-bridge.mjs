@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const VERSION = '0.4.2';
+const VERSION = '0.5.0';
 const PROTOCOL = 1;
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE = 24 * 1024 * 1024;
@@ -129,8 +129,8 @@ const PRESETS = [
     description: 'Aider pair programmer, one message per run, chat history restored between runs.',
     mode: 'turn',
     command: 'aider',
-    args: ['{modelArgs}', '--yes-always', '--no-pretty', '--no-fancy-input', '--no-check-update', '--no-show-release-notes', '--no-show-model-warnings', '--message', '{prompt}'],
-    continueArgs: ['{modelArgs}', '--yes-always', '--no-pretty', '--no-fancy-input', '--no-check-update', '--no-show-release-notes', '--no-show-model-warnings', '--restore-chat-history', '--message', '{prompt}'],
+    args: ['{modelArgs}', '--yes-always', '--no-pretty', '--no-fancy-input', '--no-check-update', '--no-show-release-notes', '--no-show-model-warnings', '--no-suggest-shell-commands', '--message', '{prompt}'],
+    continueArgs: ['{modelArgs}', '--yes-always', '--no-pretty', '--no-fancy-input', '--no-check-update', '--no-show-release-notes', '--no-show-model-warnings', '--no-suggest-shell-commands', '--restore-chat-history', '--message', '{prompt}'],
     backends: {
       [LMSTUDIO]: { modelArgs: ['--model', 'lm_studio/{model}'], env: { LM_STUDIO_API_BASE: '{lmstudio}/v1', LM_STUDIO_API_KEY: 'dummy-api-key' } },
       [OLLAMA]: { modelArgs: ['--model', 'ollama_chat/{model}'], env: { OLLAMA_API_BASE: '{ollama}' } },
@@ -484,35 +484,211 @@ function ensurePiModel(spec, model, vars, vision) {
 
 // ---------------------------------------------------------------- pi rpc
 
-// Loaded into pi with -e. Asks the phone before any tool that is not read-only, like Claude Code does.
-const PI_PERMISSION_EXTENSION = `// Written by Harness Bridge. Asks the Harness Remote app before pi runs tools that can change things.
-const READ_ONLY = new Set(['read', 'grep', 'find', 'ls']);
+// ---- command guard (serialized into the pi extension below; only uses path and os)
+// guard:start
+function analyzeCommand(command, cwd, home, platform, env) {
+  const win = platform === 'win32';
+  const P = win ? path.win32 : path.posix;
+  const fold = (p) => (win ? p.toLowerCase() : p);
+  const clean = (p) => {
+    const r = P.resolve(p);
+    return r.length > P.parse(r).root.length ? r.replace(/[\\/]+$/, '') : r;
+  };
+  const same = (a, b) => fold(clean(a)) === fold(clean(b));
+  const inside = (child, parent) => {
+    const c = fold(clean(child));
+    const q = fold(clean(parent));
+    return c === q || c.startsWith(q.endsWith(P.sep) ? q : q + P.sep);
+  };
+  const known = {
+    HOME: home, USERPROFILE: home, HOMEPATH: home, PWD: cwd,
+    APPDATA: env.APPDATA, LOCALAPPDATA: env.LOCALAPPDATA, TEMP: env.TEMP || env.TMP, TMP: env.TMP || env.TEMP,
+  };
+  const lookup = (name) => {
+    for (const src of [known, env]) {
+      const key = Object.keys(src).find((k) => (win ? k.toLowerCase() === name.toLowerCase() : k === name));
+      if (key && src[key]) return src[key];
+    }
+    return undefined;
+  };
+  const protectedNames = ['desktop', 'documents', 'downloads', 'pictures', 'music', 'videos', 'movies', 'public', 'favorites',
+    'contacts', 'links', 'saved games', 'searches', 'dropbox', 'google drive', 'icloud drive', 'iclouddrive', 'appdata',
+    'library', '.ssh', '.gnupg', '.config', '.local'];
+  const systemDirs = win
+    ? [env.SystemRoot || 'C:\\Windows', env.ProgramFiles || 'C:\\Program Files', env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', env.ProgramData || 'C:\\ProgramData', 'C:\\Users']
+    : ['/bin', '/boot', '/dev', '/etc', '/lib', '/lib64', '/opt', '/proc', '/root', '/sbin', '/srv', '/sys', '/usr', '/var', '/home', '/Users', '/System', '/Applications', '/Library'];
 
-function describe(name, input) {
+  const result = { destructive: false, block: null, targets: [], warn: '' };
+
+  const expand = (raw) => {
+    let unresolved = false;
+    let t = raw;
+    if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) t = home + t.slice(1);
+    t = t.replace(/\$env:([A-Za-z_][\w()]*)|\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)|%([A-Za-z_][\w()]*)%/g, (m, a, b, c, d) => {
+      const v = lookup(a || b || c || d);
+      if (v === undefined) { unresolved = true; return ''; }
+      return v;
+    });
+    if (win) t = t.replace(/^\/([a-zA-Z])(\/|$)/, (m, drive) => drive.toUpperCase() + ':\\');
+    return { path: t, unresolved };
+  };
+
+  const judge = (target) => {
+    if (same(target, P.parse(P.resolve(target)).root)) return 'it is a whole drive or the filesystem root';
+    if (inside(home, target)) return 'it is your user folder (or contains it)';
+    const parent = P.dirname(clean(target));
+    const base = P.basename(clean(target)).toLowerCase();
+    if (same(parent, home) && (protectedNames.includes(base) || base.startsWith('onedrive'))) return `it is your ${P.basename(clean(target))} folder`;
+    if (same(parent, P.join(home, 'AppData')) || same(parent, P.join(home, '.local'))) return `it is ${clean(target)}, which many apps depend on`;
+    if (inside(cwd, target)) return 'it is the project folder (or contains it)';
+    for (const d of systemDirs) if (d && inside(d, target)) return 'it is a system folder (or contains one)';
+    return null;
+  };
+
+  const tokenize = (seg) => {
+    const out = [];
+    const re = /"((?:\\.|[^"\\])*)"|'([^']*)'|(\S+)/g;
+    let m;
+    while ((m = re.exec(seg))) out.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+    return out;
+  };
+
+  const DELETE = new Set(['rm', 'rmdir', 'rd', 'del', 'erase', 'ri', 'remove-item', 'unlink', 'shred', 'rimraf', 'trash', 'rmtree']);
+  const segments = command.split(/\s*(?:&&|\|\||;|\||\r?\n)\s*/).filter(Boolean);
+  let here = cwd;
+  segments.forEach((seg, i) => {
+    let tokens = tokenize(seg);
+    while (tokens.length && /^(sudo|command|exec|nohup|time|xargs|&|\.)$/i.test(tokens[0])) tokens = tokens.slice(1);
+    if (!tokens.length) return;
+    const head = tokens[0].toLowerCase().replace(/\.(exe|cmd|bat)$/, '').replace(/^.*[\\/]/, '');
+    if (['cd', 'pushd', 'set-location', 'sl', 'chdir'].includes(head)) {
+      const dest = tokens.slice(1).find((t) => !/^-/.test(t) && !/^\/d$/i.test(t));
+      if (!dest) { here = home; return; }
+      const { path: d, unresolved } = expand(dest);
+      here = unresolved || here === null ? null : P.resolve(here, d);
+      return;
+    }
+    if (['cmd', 'powershell', 'pwsh', 'bash', 'sh', 'zsh'].includes(head)) {
+      const flag = tokens.findIndex((t, j) => j > 0 && /^([/-](c|command)|-encodedcommand)$/i.test(t));
+      if (flag > 0) {
+        const inner = analyzeCommand(tokens.slice(flag + 1).join(' '), cwd, home, platform, env);
+        if (inner.block && !result.block) result.block = inner.block;
+        if (inner.destructive) { result.destructive = true; result.targets.push(...inner.targets); result.warn = result.warn || inner.warn; }
+      }
+      return;
+    }
+    if (/^(format|diskpart|mkfs(\..+)?|fdisk|cipher)$/.test(head) || (head === 'dd' && tokens.some((t) => /^of=/.test(t)))) {
+      result.block = result.block || `${head} can erase whole drives`;
+      return;
+    }
+    const lower = seg.toLowerCase();
+    if ((head === 'find' && /\s-(delete|exec\s+rm)\b/.test(lower)) || (head === 'git' && /\bclean\b/.test(lower) && /\s-[a-z]*f/.test(lower)) ||
+        (head === 'git' && /\breset\b.*--hard/.test(lower)) || (head === 'robocopy' && /\/(mir|purge)\b/.test(lower)) ||
+        /shutil\.rmtree|os\.(remove|unlink|rmdir)|rmsync|fs\.rm\(|fs\.promises\.rm|directory\]::delete|remove-item/.test(lower) && !DELETE.has(head)) {
+      result.destructive = true;
+      result.warn = result.warn || 'This command can permanently delete files';
+      return;
+    }
+    if (!DELETE.has(head)) return;
+    result.destructive = true;
+    result.warn = 'This permanently deletes files (they do not go to the Recycle Bin)';
+    const args = [];
+    for (let j = 1; j < tokens.length; j++) {
+      const t = tokens[j];
+      if (/^-(filter|include|exclude|erroraction|ea)$/i.test(t)) { j++; continue; }
+      if (/^-/.test(t) || /^\/[a-zA-Z]$/.test(t) || /^[<>]|^\d?>/.test(t)) continue;
+      args.push(t);
+    }
+    if (!args.length && i > 0) {
+      const prev = tokenize(segments[i - 1]);
+      if (/^(get-childitem|gci|ls|dir|get-item|gi)$/i.test(prev[0] || '')) args.push(...prev.slice(1).filter((t) => !/^-/.test(t)));
+    }
+    for (const raw of args) {
+      const { path: expanded, unresolved } = expand(raw);
+      if (unresolved) { result.block = result.block || `it deletes "${raw}", which uses a variable that is not set (an empty variable can turn this into a delete of a much bigger folder)`; continue; }
+      if (!expanded.trim()) { result.block = result.block || 'its target path is empty'; continue; }
+      const wild = /[*?]/.test(expanded);
+      let target = expanded;
+      if (wild) {
+        const parts = expanded.split(/[\\/]/);
+        const k = parts.findIndex((x) => /[*?]/.test(x));
+        target = parts.slice(0, k).join(P.sep) || (expanded.startsWith('/') ? '/' : '.');
+      }
+      if (/^[a-zA-Z]:$/.test(target)) target += P.sep;
+      if (here === null && !P.isAbsolute(target)) { result.block = result.block || `it deletes "${raw}" after changing to a folder that could not be worked out`; continue; }
+      const resolved = P.resolve(here || cwd, target);
+      const why = judge(resolved);
+      result.targets.push(wild ? `${resolved}${P.sep}${expanded.split(/[\\/]/).slice(-1)[0]}` : resolved);
+      if (why) result.block = result.block || `it would delete ${wild ? 'the contents of ' : ''}${clean(resolved)}: ${why}`;
+    }
+  });
+  return result;
+}
+// guard:end
+
+function describeToolCall(name, input) {
   const a = input || {};
   if (typeof a.command === 'string') return a.command;
-  if (name === 'write' && typeof a.path === 'string') return a.path + ' (' + String(a.content || '').split('\\n').length + ' lines)';
+  if (name === 'write' && typeof a.path === 'string') return a.path + ' (' + String(a.content || '').split('\n').length + ' lines)';
   if (typeof a.path === 'string') return a.path;
   const json = JSON.stringify(a);
   return json.length > 600 ? json.slice(0, 600) + '…' : json;
 }
 
-export default function (pi) {
+function piGuardMain(pi) {
+  const READ_ONLY = new Set(['read', 'grep', 'find', 'ls']);
   const always = new Set();
   pi.on('tool_call', async (event, ctx) => {
-    if (process.env.HARNESS_REMOTE_PERMISSIONS !== 'ask' || ctx.mode !== 'rpc' || event.parentToolCallId) return undefined;
     const name = event.toolName;
-    if (READ_ONLY.has(name) || always.has(name)) return undefined;
+    const input = event.input || {};
+    const cwd = ctx.cwd || process.cwd();
+    const asking = process.env.HARNESS_REMOTE_PERMISSIONS === 'ask';
+    const shell = typeof input.command === 'string';
+    if (shell) {
+      const a = analyzeCommand(input.command, cwd, os.homedir(), process.platform, process.env);
+      if (a.block) {
+        ctx.ui.notify('Blocked a command: ' + a.block, 'warning');
+        return { block: true, reason: 'Harness Remote blocked this command because ' + a.block + '. Do not retry or work around this. Tell the user exactly what you wanted to delete and why, and let them do it themselves.' };
+      }
+      if (a.destructive) {
+        const detail = (a.targets.length ? 'Deletes:\n' + a.targets.map((t) => '  ' + t).join('\n') + '\n\n' : '') + 'Command:\n' + input.command;
+        const choice = await ctx.ui.select('⚠ ' + a.warn + '\n' + detail, ['No', 'Yes, run it']);
+        if (choice === 'Yes, run it') return undefined;
+        return { block: true, reason: 'The user declined this destructive command from their phone.' };
+      }
+    }
+    if ((name === 'write' || name === 'edit') && typeof input.path === 'string') {
+      const target = path.resolve(cwd, input.path);
+      const rel = path.relative(cwd, target);
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        const choice = await ctx.ui.select('⚠ Change a file outside the project folder?\n' + target, ['No', 'Yes']);
+        if (choice === 'Yes') return undefined;
+        return { block: true, reason: 'The user declined a change outside the project folder.' };
+      }
+    }
+    if (!asking || READ_ONLY.has(name)) return undefined;
     const tool = pi.getAllTools().find((t) => t.name === name);
     if (tool && tool.annotations && tool.annotations.readOnlyHint === true) return undefined;
-    const yesAll = 'Yes, and don\\'t ask again for ' + name + ' this session';
-    const choice = await ctx.ui.select('Allow ' + name + '?\\n' + describe(name, event.input), ['Yes', yesAll, 'No']);
+    if (!shell && always.has(name)) return undefined;
+    const yesAll = "Yes, and don't ask again for " + name + ' this session';
+    const options = shell ? ['Yes', 'No'] : ['Yes', yesAll, 'No'];
+    const choice = await ctx.ui.select('Allow ' + name + '?\n' + describeToolCall(name, input), options);
     if (choice === yesAll) always.add(name);
     if (choice === 'Yes' || choice === yesAll) return undefined;
     return { block: true, reason: 'The user declined this ' + name + ' call from their phone.' };
   });
 }
-`;
+
+// Loaded into pi with -e: blocks commands that would wipe user data and asks the phone before the rest.
+const PI_PERMISSION_EXTENSION = [
+  '// Written by Harness Bridge. Guards destructive commands and asks the Harness Remote app before pi changes things.',
+  "import path from 'node:path';",
+  "import os from 'node:os';",
+  analyzeCommand.toString(),
+  describeToolCall.toString(),
+  'export default ' + piGuardMain.toString(),
+  '',
+].join('\n\n');
 
 function piPermissionExtension() {
   const file = path.join(path.dirname(configPath), 'pi-permissions.ts');

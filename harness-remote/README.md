@@ -171,8 +171,31 @@ Check what the bridge will offer with `node harness-bridge.mjs --print-config`.
 
 The bridge runs programs on your computer for whoever holds the token, so treat the token like an SSH key.
 
+**The agent runs with your Windows/macOS/Linux account's full permissions.** The folder you pick is only where it starts. It does not stop the model from touching anything else your account can reach. Local models in particular can produce wrong or dangerous commands. The bridge adds guard rails, described below, but they are a safety net, not a sandbox. For real isolation, run the bridge under a separate user account, in WSL, or in a VM. Keep OneDrive or File History backups switched on.
+
+**Delete guard (pi, always on, including when "Ask before commands and edits" is off):**
+- **Blocked outright, with no approve button:** recursive deletes (`rm -rf`, `Remove-Item -Recurse`, `rd /s`, `del /s`, `rimraf`, also inside `cmd /c`, `powershell -c` or `bash -c`, and after `cd`) whose target is any of these:
+  - a drive or filesystem root
+  - your user folder or anything above it
+  - Desktop, Documents, Downloads, Pictures, Music, Videos, OneDrive, AppData, `.ssh`, `.config` and similar
+  - the project folder or anything above it
+  - system folders
+  - a path built from a variable that isn't set
+
+  Also blocked: `format`, `diskpart`, `mkfs`, and `dd of=`. The model is told not to work around a block.
+- **Always asked, with No as the first option:** every other delete, plus `git clean -f`, `git reset --hard`, `find -delete`, `robocopy /mir`, and scripts that call `rmtree`, `rmSync` or `Remove-Item`. The card lists the resolved paths.
+- **Always asked:** writes and edits to files outside the project folder.
+- **Shell commands are approved one at a time.** There is no "don't ask again" for bash or PowerShell.
+
+The guard reads the command text. It cannot see inside scripts the agent writes to a file and then runs. That is why every command asks by default.
+
+**Other harnesses:**
+- Aider runs with `--no-suggest-shell-commands`, so it edits files but never runs shell commands.
+- Codex runs in its `workspace-write` sandbox. Check whether your Codex version supports that sandbox on Windows.
+- Claude Code runs with `acceptEdits`, which doesn't approve shell commands in `-p` mode.
+
 - **Pairing**: a 6-digit, one-use code, valid for 10 minutes after the bridge starts. Pairing locks after 10 wrong attempts. The phone receives the 32-character random token, and every WebSocket connection is checked against it in constant time.
-- **No arbitrary commands**: the phone can only start harnesses listed in your config, in folders under `roots`. The `shell` preset, which would give full access, is off unless you enable it.
+- **Which programs the phone can start**: only harnesses listed in your config, starting in folders under `roots`. The phone can't run a command itself, but the agent it drives can run any command your account can (see above). The `shell` preset is off unless you enable it.
 - **Transport**: plain `ws://` by default. That's fine on a trusted LAN. Anywhere else, use **Tailscale** (WireGuard-encrypted), or set `tls` and the phone uses `https://`/`wss://` (enter the address with `https://`).
 - The config and transcripts are written with mode `0600`.
 

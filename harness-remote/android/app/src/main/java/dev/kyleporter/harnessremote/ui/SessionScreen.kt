@@ -661,16 +661,18 @@ private fun AskCard(item: Item.Ask, answerable: Boolean, onAnswer: Answer) {
     val heading = item.title.lineSequence().firstOrNull().orEmpty()
     val detail = (item.title.lines().drop(1) + listOfNotNull(item.message.ifBlank { null })).joinToString("\n").trim()
     val live = item.answer == null && answerable
+    val danger = heading.startsWith("⚠")
+    val accent = if (danger) Red else Amber
     var text by rememberSaveable(item.key) { mutableStateOf(item.placeholder) }
     Column(
         Modifier
             .fillMaxWidth()
-            .border(BorderStroke(1.dp, if (live) Amber else SurfaceHigh), RoundedCornerShape(10.dp))
+            .border(BorderStroke(if (danger && live) 2.dp else 1.dp, if (live) accent else SurfaceHigh), RoundedCornerShape(10.dp))
             .background(Surface, RoundedCornerShape(10.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(heading, color = if (live) Amber else OffWhite, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(heading, color = if (live) accent else OffWhite, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         if (detail.isNotBlank()) {
             Text(
                 detail,
@@ -686,7 +688,7 @@ private fun AskCard(item: Item.Ask, answerable: Boolean, onAnswer: Answer) {
                 OutlinedButton(
                     onClick = { onAnswer(item.askId, option, null, false) },
                     modifier = Modifier.fillMaxWidth(),
-                    border = BorderStroke(1.dp, if (negative) SurfaceHigh else Amber.copy(alpha = 0.6f)),
+                    border = BorderStroke(1.dp, if (negative) SurfaceHigh else accent.copy(alpha = 0.6f)),
                 ) {
                     Text("${i + 1}. $option", color = if (negative) Gray else OffWhite, modifier = Modifier.fillMaxWidth(), fontSize = 13.sp)
                 }

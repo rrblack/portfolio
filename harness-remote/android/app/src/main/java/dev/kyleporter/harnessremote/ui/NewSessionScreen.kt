@@ -205,8 +205,8 @@ fun NewSessionScreen(hub: Hub, client: BridgeClient) {
                     Column(Modifier.weight(1f)) {
                         Text("Ask before commands and edits", color = OffWhite, fontSize = 14.sp)
                         Text(
-                            if (askPermission) "You approve each bash, write and edit call from the phone. Reads and searches run without asking."
-                            else "Everything runs without asking, like pi does on its own.",
+                            if (askPermission) "You approve every command and file change from the phone. Reads and searches run without asking."
+                            else "Commands and edits run without asking. Deletes still always ask, and deletes of your user folders are always blocked.",
                             color = Gray, fontSize = 12.sp,
                         )
                     }
